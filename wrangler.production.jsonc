@@ -4,7 +4,10 @@
   "main": "worker.js",
   "compatibility_date": "2026-10-06",
   "assets": {
-    "directory": "."
+    "directory": ".",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
   },
   "d1_databases": [
     {
@@ -13,8 +16,5 @@
       "database_id": "d9dbfc4d-60ae-4d25-a896-029b1c5f41a2",
       "migrations_dir": "migrations"
     }
-  ],
-  "secrets": {
-    "required": ["BOOTSTRAP_ADMIN_EMAIL"]
-  }
+  ]
 }

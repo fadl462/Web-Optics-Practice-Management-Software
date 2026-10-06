@@ -44,17 +44,13 @@ function allowedOrigin(request) {
   return origin === new URL(request.url).origin;
 }
 
-async function requireIdentity(request, env, ctx) {
-  // Cloudflare Access must protect the API hostname. Access injects this
-  // verified identity header after authentication. Do not expose the API
-  // directly without an Access policy in front of it.
+async function requireIdentity(request, env) {
+  // Cloudflare Access is the production authentication boundary.
+  // For Workers with Static Assets, use the Access identity header because
+  // the internal assets router does not expose ctx.access to user Worker code.
   const email = String(request.headers.get('Cf-Access-Authenticated-User-Email') || '').trim().toLowerCase();
   if (!email) return { response: error('Authentication required.', 401, 'AUTH_REQUIRED') };
-  const identity = {
-    email,
-    name: request.headers.get('Cf-Access-Authenticated-User-Name') || email,
-  };
-  if (!email) return { response: error('Authenticated identity is missing an email.', 401, 'IDENTITY_MISSING') };
+  const displayName = String(request.headers.get('Cf-Access-Authenticated-User-Name') || '').trim();
 
   let staff = await env.DB.prepare(
     `SELECT id, email, name, role, active FROM staff WHERE lower(email)=? LIMIT 1`
@@ -65,8 +61,8 @@ async function requireIdentity(request, env, ctx) {
     const staffId = id('USR');
     await env.DB.prepare(
       `INSERT INTO staff (id,email,name,role,active,created_at,updated_at) VALUES (?,?,?,?,1,?,?)`
-    ).bind(staffId, email, identity?.name || email, 'Practice Manager', now(), now()).run();
-    staff = { id: staffId, email, name: identity?.name || email, role: 'Practice Manager', active: 1 };
+    ).bind(staffId, email, displayName || email, 'Practice Manager', now(), now()).run();
+    staff = { id: staffId, email, name: displayName || email, role: 'Practice Manager', active: 1 };
   }
 
   if (!staff || !staff.active) return { response: error('Your account is not authorized for OptiFlow.', 403, 'NOT_AUTHORIZED') };
@@ -105,7 +101,7 @@ async function api(request, env, ctx) {
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   if (!allowedOrigin(request)) return error('Cross-origin request blocked.', 403, 'ORIGIN_BLOCKED');
 
-  const auth = await requireIdentity(request, env, ctx);
+  const auth = await requireIdentity(request, env);
   if (auth.response) return auth.response;
   const { staff } = auth;
 
