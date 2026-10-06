@@ -71,6 +71,41 @@ if(savedRoute.startsWith('patient=')){const pid=decodeURIComponent(savedRoute.sl
 window.addEventListener('hashchange',()=>{const h=location.hash.replace(/^#/,'');if(validPages.includes(h)){current=h;selectedPatient=null;render();}else if(h.startsWith('patient=')){const pid=decodeURIComponent(h.slice(8));selectedPatient=state.patients.find(p=>p.id===pid)||null;current='patients';render();}});
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 const save=()=>localStorage.setItem('optiflow_state',JSON.stringify(state));
+let backend={status:'checking',message:'Connecting to secure practice records…'};
+async function apiRequest(path, options={}){
+ const res=await fetch('/api/'+path,{credentials:'same-origin',headers:{'content-type':'application/json',...(options.headers||{})},...options});
+ let payload={}; try{payload=await res.json()}catch{}
+ if(!res.ok) throw new Error(payload?.error?.message||('API request failed ('+res.status+')'));
+ return payload;
+}
+function dbPatient(row){
+ const name=[row.first_name,row.last_name].filter(Boolean).join(' ');
+ return {id:row.id,name,dob:row.date_of_birth||'Not provided',phone:row.phone||'—',email:row.email||'—',insurance:'Self-pay',policy:'—',status:row.status||'Active',lastVisit:'—',nextRecall:'Not set',rx:{od:'—',os:'—',add:'—'},notes:'',medicalHistory:[],allergies:[],medications:[],prescriptions:[],insuranceDetails:{provider:'Self-pay',policy:'—',memberId:'—',status:'Pending'},communication:{sms:true,email:true,preferred:'SMS'},timeline:[]};
+}
+function dbRecall(row){return {id:row.id,patient:[row.first_name,row.last_name].filter(Boolean).join(' '),patientId:row.patient_id,type:row.type,due:row.due_date||'—',channel:row.channel||'SMS + Email',status:row.status||'Scheduled'};}
+function dbTask(row){return {id:row.id,title:row.title,owner:row.owner||'Unassigned',patientId:row.patient_id||null,due:row.due_date||'—',priority:row.priority||'Normal',done:!!row.done};}
+function dbMessage(row){return {id:row.id,patientId:row.patient_id,patient:[row.first_name,row.last_name].filter(Boolean).join(' '),time:row.created_at,text:row.body,mine:row.direction==='outbound',channel:row.channel,status:row.status};}
+function dbAppointment(row){return {id:row.id,patientId:row.patient_id,patient:[row.first_name,row.last_name].filter(Boolean).join(' '),time:row.start_at,visit:row.visit_type,provider:row.provider||'—',status:row.status,date:row.start_at};}
+async function syncBackend(){
+ try{
+  const health=await apiRequest('health');
+  const [ps,rs,ts,ms,as]=await Promise.all([apiRequest('patients'),apiRequest('recalls'),apiRequest('tasks'),apiRequest('conversations'),apiRequest('appointments')]);
+  state.patients=(ps.data||[]).map(dbPatient);
+  state.recalls=(rs.data||[]).map(dbRecall);
+  state.tasks=(ts.data||[]).map(dbTask);
+  state.messages=(ms.data||[]).map(dbMessage);
+  state.appointments=(as.data||[]).map(dbAppointment);
+  state.backendConnected=true;
+  backend={status:'connected',message:'Secure records connected'};
+  if(selectedPatient) selectedPatient=state.patients.find(p=>p.id===selectedPatient.id)||null;
+  render();
+ }catch(e){
+  state.backendConnected=false;
+  backend={status:'offline',message:'Secure records unavailable — showing local workspace data'};
+  render();
+ }
+}
+window.syncBackend=syncBackend;
 const initials=n=>n.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase();
 const toast=m=>{const x=document.createElement('div');x.className='toast';x.textContent=m;document.body.appendChild(x);setTimeout(()=>x.remove(),2400)};
 const permissionMap={
@@ -83,8 +118,8 @@ function can(action){return !!(permissionMap[state.user?.role||'Viewer']||permis
 function resetDemoData(){localStorage.removeItem('optiflow_state');location.hash='dashboard';location.reload();}
 window.resetDemoData=resetDemoData;
 
-function nav(){return `<aside class="sidebar"><div class="brand"><div class="logo">◉</div><div><strong>OptiFlow</strong><small>Practice Management</small></div></div><div class="nav-title">Workspace</div><div class="nav">${[['dashboard','▦','Dashboard'],['patients','♙','Patients'],['recalls','◷','Recalls'],['messages','✉','Messages'],['tasks','✓','Tasks']].map(x=>`<button class="${current===x[0]?'active':''}" onclick="window.go('${x[0]}')"><span class="ico">${x[1]}</span>${x[2]}</button>`).join('')}</div><div class="nav-title">Practice</div><div class="nav"><a class="nav-link ${current==='settings'?'active':''}" href="#settings"><span class="ico">⚙</span>Settings</a><a class="nav-link ${current==='reports'?'active':''}" href="#reports"><span class="ico">▥</span>Reports</a></div><div class="sidebar-foot"><div class="user-mini"><div class="avatar">${state.user.initials}</div><div><strong>${state.user.name}</strong><span>${state.user.role}</span></div></div></div></aside>`}
-function topbar(){return `<header class="topbar"><div class="crumb">OptiFlow / <strong>${current[0].toUpperCase()+current.slice(1)}</strong></div><div class="top-actions"><button class="icon-btn" onclick="toast('No new notifications')">♢</button><span class="role">${state.user.role}</span><div class="avatar">${state.user.initials}</div></div></header>`}
+function nav(){return `<aside class="sidebar"><div class="brand"><div class="logo">◉</div><div><strong>OptiFlow</strong><small>Practice Management</small></div></div><div class="nav-title">Workspace</div><div class="nav">${[['dashboard','▦','Dashboard'],['patients','♙','Patients'],['recalls','◷','Recalls'],['messages','✉','Messages'],['tasks','✓','Tasks']].map(x=>`<button class="${current===x[0]?'active':''}" onclick="window.go('${x[0]}')"><span class="ico">${x[1]}</span>${x[2]}</button>`).join('')}</div><div class="nav-title">Practice</div><div class="nav"><button class="${current==='settings'?'active':''}" onclick="window.go('settings')"><span class="ico">⚙</span>Settings</button><button class="${current==='reports'?'active':''}" onclick="window.go('reports')"><span class="ico">▥</span>Reports</button></div><div class="sidebar-foot"><div class="user-mini"><div class="avatar">${state.user.initials}</div><div><strong>${state.user.name}</strong><span>${state.user.role}</span></div></div></div></aside>`}
+function topbar(){return `<header class="topbar"><div class="crumb">OptiFlow / <strong>${current[0].toUpperCase()+current.slice(1)}</strong></div><div class="top-actions"><span class="backend-pill ${backend.status==='connected'?'connected':'offline'}"><i></i>${esc(backend.message)}</span><button class="icon-btn" onclick="toast('No new notifications')">♢</button><span class="role">${state.user.role}</span><div class="avatar">${state.user.initials}</div></div></header>`}
 function layout(body){return `<div class="app">${nav()}<main class="main">${topbar()}<section class="content">${body}</section></main><nav class="mobile-nav">${[['dashboard','▦','Home'],['patients','♙','Patients'],['recalls','◷','Recalls'],['messages','✉','Messages'],['tasks','✓','Tasks']].map(x=>`<button class="${current===x[0]?'active':''}" onclick="go('${x[0]}')"><span>${x[1]}</span>${x[2]}</button>`).join('')}</nav></div>`}
 function patientRows(list){return list.map(p=>`<tr onclick="openPatient('${p.id}')" style="cursor:pointer"><td><div class="patient-cell"><div class="avatar">${initials(p.name)}</div><div><strong>${esc(p.name)}</strong><span>${p.id}</span></div></div></td><td>${p.dob}</td><td>${p.phone}</td><td>${esc(p.insurance)}</td><td><span class="badge ${p.status==='Active'?'green':'amber'}">${p.status}</span></td><td>${p.nextRecall}</td></tr>`).join('')}
 function intelligencePanel(){
@@ -321,7 +356,23 @@ function patientDetail(p){
 }
 function setPatientTab(tab){window.patientTab=tab;render();}
 
-function openPatient(id){selectedPatient=state.patients.find(p=>p.id===id);current='patients';location.hash='patient='+encodeURIComponent(id);render();}
+async function openPatient(id){
+ selectedPatient=state.patients.find(p=>p.id===id)||null; current='patients'; location.hash='patient='+encodeURIComponent(id); render();
+ if(state.backendConnected && selectedPatient){
+  try{
+   const res=await apiRequest('patients/'+encodeURIComponent(id)); const d=res.data||{}; const p=selectedPatient;
+   const history=(d.history||[]).map(x=>({title:x.category,detail:x.description,time:x.event_date||x.created_at}));
+   const allergies=(d.allergies||[]).map(x=>x.allergen+(x.reaction?' — '+x.reaction:''));
+   const medications=(d.medications||[]).map(x=>({name:x.name,dose:[x.dose,x.frequency].filter(Boolean).join(' · ')}));
+   const rxs=(d.prescriptions||[]).map(x=>({date:x.prescribed_at,od:[x.od_sphere,x.od_cylinder,x.od_axis].filter(Boolean).join(' '),os:[x.os_sphere,x.os_cylinder,x.os_axis].filter(Boolean).join(' '),add:x.od_add||x.os_add||'—',notes:x.notes||''}));
+   const ins=(d.insurance||[])[0];
+   Object.assign(p,{medicalHistory:history,allergies,medications,prescriptions:rxs,insuranceDetails:ins?{provider:ins.provider,policy:ins.policy_number||'—',memberId:ins.member_id||'—',status:ins.status||'Pending'}:p.insuranceDetails});
+   if(rxs[0]) p.rx={od:rxs[0].od||'—',os:rxs[0].os||'—',add:rxs[0].add||'—'};
+   p.timeline=[...history.map(x=>({title:x.title,detail:x.detail,time:x.time})),...(d.prescriptions||[]).slice(0,3).map(x=>({title:'Prescription recorded',detail:x.notes||'Prescription updated',time:x.prescribed_at}))];
+   render();
+  }catch(e){toast('Patient record could not be refreshed from secure storage');}
+ }
+}
 function openModal(type,arg=''){
  let title=type==='patient'?'Add patient':type==='schedule'?'Schedule manual recall':type==='message'?'New patient message':type==='task'?'Create task':'Schedule appointment';
  let body='';
@@ -333,44 +384,49 @@ function openModal(type,arg=''){
  document.body.insertAdjacentHTML('beforeend',`<div class="modal" id="modal"><div class="modal-card"><div class="modal-head"><h2>${title}</h2><button class="icon-btn" onclick="closeModal()">×</button></div><div class="modal-body">${body}</div><div class="modal-foot"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn primary" onclick="submitModal('${type}')">${type==='message'?'Send message':type==='appointment'?'Book appointment':'Save'}</button></div></div></div>`);
 }
 function closeModal(){document.getElementById('modal')?.remove()}
-function submitModal(type){
+async function submitModal(type){
  if(type==='patient'){
-  const name=((document.getElementById('f1')?.value||'New')+' '+(document.getElementById('f2')?.value||'Patient')).trim();
-  state.patients.unshift({id:'P-'+Math.floor(10000+Math.random()*89999),name,dob:document.getElementById('f3')?.value||'Not provided',phone:document.getElementById('f4')?.value||'—',email:document.getElementById('f5')?.value||'—',insurance:document.getElementById('f6')?.value||'Self-pay',policy:document.getElementById('f7')?.value||'—',status:'Active',lastVisit:'New record',nextRecall:document.getElementById('f8')?.value||'Not set',rx:{od:'—',os:'—',add:'—'},notes:document.getElementById('f9')?.value||'',medicalHistory:[],allergies:[],medications:[],prescriptions:[],insuranceDetails:{provider:document.getElementById('f6')?.value||'Self-pay',policy:document.getElementById('f7')?.value||'—',memberId:document.getElementById('f7')?.value||'—',status:'Pending'},communication:{sms:true,email:true,preferred:'SMS'},timeline:[{title:'Patient record created',detail:'New patient record added to the practice.',time:'Just now'}]});
-  state.activity.unshift({icon:'♙',title:'Patient record created',detail:name,time:'Just now'});toast('Patient record created');
+  const first=(document.getElementById('f1')?.value||'New').trim(), last=(document.getElementById('f2')?.value||'Patient').trim();
+  if(!first||!last){toast('First name and last name are required');return;}
+  const payload={firstName:first,lastName:last,dateOfBirth:document.getElementById('f3')?.value||null,phone:document.getElementById('f4')?.value||null,email:document.getElementById('f5')?.value||null};
+  let patientId='P-'+Math.floor(10000+Math.random()*89999);
+  if(state.backendConnected){try{patientId=(await apiRequest('patients',{method:'POST',body:JSON.stringify(payload)})).data.id;}catch(e){toast(e.message);return;}}
+  const name=(first+' '+last).trim();
+  state.patients.unshift({id:patientId,name,dob:payload.dateOfBirth||'Not provided',phone:payload.phone||'—',email:payload.email||'—',insurance:document.getElementById('f6')?.value||'Self-pay',policy:document.getElementById('f7')?.value||'—',status:'Active',lastVisit:'New record',nextRecall:document.getElementById('f8')?.value||'Not set',rx:{od:'—',os:'—',add:'—'},notes:document.getElementById('f9')?.value||'',medicalHistory:[],allergies:[],medications:[],prescriptions:[],insuranceDetails:{provider:document.getElementById('f6')?.value||'Self-pay',policy:document.getElementById('f7')?.value||'—',memberId:document.getElementById('f7')?.value||'—',status:'Pending'},communication:{sms:true,email:true,preferred:'SMS'},timeline:[{title:'Patient record created',detail:'New patient record added to the practice.',time:'Just now'}]});
+  state.activity.unshift({icon:'♙',title:'Patient record created',detail:name,time:'Just now'});toast(state.backendConnected?'Patient record saved securely':'Patient record created locally');
  }else if(type==='task'){
-  state.tasks.unshift({id:Date.now(),title:document.getElementById('f1').value||'New task',owner:document.getElementById('f2').value,due:document.getElementById('f4').value||'Today',priority:document.getElementById('f3').value,patientId:document.getElementById('f5').value||null,done:false});toast('Task created');
+  const taskPayload={title:document.getElementById('f1').value||'New task',owner:document.getElementById('f2').value,dueDate:document.getElementById('f4').value||null,priority:document.getElementById('f3').value,patientId:document.getElementById('f5').value||null};
+  let taskId=Date.now(); if(state.backendConnected){try{taskId=(await apiRequest('tasks',{method:'POST',body:JSON.stringify(taskPayload)})).data.id;}catch(e){toast(e.message);return;}}
+  state.tasks.unshift({id:taskId,title:taskPayload.title,owner:taskPayload.owner,due:taskPayload.dueDate||'Today',priority:taskPayload.priority,patientId:taskPayload.patientId,done:false});toast(state.backendConnected?'Task saved securely':'Task created');
  }else if(type==='message'){
   const patient=document.getElementById('f1').value, channel=document.getElementById('f2').value, text=document.getElementById('f3').value.trim();
   if(!text){toast('Write a message before sending');return;}
-  state.messages.push({patient,time:'Just now',text,mine:true,channel,unread:false});window.selectedConversation=patient;toast(channel+' message queued');
+  const target=state.patients.find(p=>p.name===patient); if(state.backendConnected){if(!target){toast('Patient record not found');return;}try{await apiRequest('messages',{method:'POST',body:JSON.stringify({patientId:target.id,channel,text})});}catch(e){toast(e.message);return;}}
+  state.messages.push({patient,patientId:target?.id,time:'Just now',text,mine:true,channel,unread:false,status:'Queued'});window.selectedConversation=patient;toast(state.backendConnected?channel+' message queued securely':channel+' message queued');
  }else if(type==='schedule'){
   const patient=document.getElementById('f1').value,typeName=document.getElementById('f2').value,date=document.getElementById('f3').value||'Scheduled',channel=document.getElementById('f4').value;
-  state.recalls.unshift({id:Date.now(),patient,type:typeName,due:date,channel,status:channel==='Manual staff follow-up'?'Manual':'Scheduled',message:document.getElementById('f5').value});toast('Recall follow-up scheduled');
+  const target=state.patients.find(p=>p.name===patient); if(state.backendConnected){if(!target){toast('Patient record not found');return;}try{const created=await apiRequest('recalls',{method:'POST',body:JSON.stringify({patientId:target.id,type:typeName,dueDate:date,channel,source:'Manual'})});state.recalls.unshift({id:created.data.id,patient,patientId:target.id,type:typeName,due:date,channel,status:'Scheduled'});}catch(e){toast(e.message);return;}}else state.recalls.unshift({id:Date.now(),patient,type:typeName,due:date,channel,status:channel==='Manual staff follow-up'?'Manual':'Scheduled',message:document.getElementById('f5').value});toast(state.backendConnected?'Recall saved securely':'Recall follow-up scheduled');
  }else if(type==='appointment'){
-  const patient=document.getElementById('f1').value;state.appointments.unshift({id:Date.now(),time:document.getElementById('f3').value||'TBD',patient,visit:document.getElementById('f4').value,provider:document.getElementById('f5').value,status:'Confirmed',date:document.getElementById('f2').value||'Scheduled'});toast('Appointment booked');
+  const patient=document.getElementById('f1').value; const target=state.patients.find(p=>p.name===patient); const date=document.getElementById('f2').value, time=document.getElementById('f3').value||'09:00';
+  if(state.backendConnected){if(!target){toast('Patient record not found');return;}try{const startAt=new Date(date+'T'+time).toISOString();const created=await apiRequest('appointments',{method:'POST',body:JSON.stringify({patientId:target.id,startAt,visitType:document.getElementById('f4').value,provider:document.getElementById('f5').value})});state.appointments.unshift({id:created.data.id,time,patient,patientId:target.id,visit:document.getElementById('f4').value,provider:document.getElementById('f5').value,status:'Pending',date});}catch(e){toast(e.message);return;}}else state.appointments.unshift({id:Date.now(),time,patient,visit:document.getElementById('f4').value,provider:document.getElementById('f5').value,status:'Confirmed',date:date||'Scheduled'});toast(state.backendConnected?'Appointment saved securely':'Appointment booked');
  }
  save();closeModal();render();
 }
 
-function sendRecall(id){
- let r=state.recalls.find(x=>x.id===id);
- if(!r)return;
- if(r.status==='Sent'){toast('Recall already sent');return;}
- r.status='Sent';
- state.messages.push({patient:r.patient,time:'Just now',text:r.message||'Your eye examination is due. Reply to this message or contact our practice to schedule an appointment.',mine:true,channel:r.channel==='Email only'?'Email':'SMS',unread:false});
- state.activity.unshift({icon:'↗',title:'Recall sent',detail:r.patient+' · '+r.channel,time:'Just now'});
- state.activity=state.activity.slice(0,12);save();toast('Recall sent to '+r.patient);render();
+async function sendRecall(id){
+ let r=state.recalls.find(x=>x.id===id); if(!r)return;
+ if(r.status==='Sent'||r.status==='Queued'){toast('Recall already queued');return;}
+ if(state.backendConnected){try{const res=await apiRequest('recalls/'+encodeURIComponent(id)+'/send',{method:'POST'});r.status=res.data?.status||'Queued';}catch(e){toast(e.message);return;}}
+ else r.status='Sent';
+ state.messages.push({patient:r.patient,time:'Just now',text:r.message||'Your eye examination is due. Reply to this message or contact our practice to schedule an appointment.',mine:true,channel:r.channel==='Email only'?'Email':'SMS',unread:false,status:state.backendConnected?'Queued':'Sent'});
+ state.activity.unshift({icon:'↗',title:state.backendConnected?'Recall queued':'Recall sent',detail:r.patient+' · '+r.channel,time:'Just now'}); state.activity=state.activity.slice(0,12);save();toast(state.backendConnected?'Recall queued securely':'Recall sent to '+r.patient);render();
 }
-function toggleTask(id){
- let t=state.tasks.find(x=>x.id===id);
- if(t){
-  t.done=!t.done;
-  state.activity=state.activity||[];
-  state.activity.unshift({icon:t.done?'✓':'◷',title:t.done?'Task completed':'Task reopened',detail:t.title,time:'Just now'});
-  state.activity=state.activity.slice(0,12);
-  save();render();toast(t.done?'Task completed':'Task reopened');
- }
+async function toggleTask(id){
+ let t=state.tasks.find(x=>x.id===id); if(!t)return;
+ const next=!t.done;
+ if(state.backendConnected){try{await apiRequest('tasks/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({done:next?1:0})});}catch(e){toast(e.message);return;}}
+ t.done=next;
+ state.activity=state.activity||[]; state.activity.unshift({icon:t.done?'✓':'◷',title:t.done?'Task completed':'Task reopened',detail:t.title,time:'Just now'}); state.activity=state.activity.slice(0,12);save();render();toast(t.done?'Task completed':'Task reopened');
 }
 function quickMessage(){
  const el=document.getElementById('quickMsg'); if(!el?.value.trim())return;
@@ -460,3 +516,5 @@ window.toggleSetting=toggleSetting;
 window.saveSettings=saveSettings;
 function render(){let body=selectedPatient?patientDetail(selectedPatient):current==='dashboard'?dashboard():current==='patients'?patients():current==='recalls'?recalls():current==='messages'?messages():current==='tasks'?tasks():current==='settings'?settings():reports();document.getElementById('app').innerHTML=layout(body);if(current==='settings'&&window.settingsSection){let key=window.settingsSection;document.querySelectorAll('.settings-tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.settings-section').forEach(x=>x.classList.remove('active'));let tab=[...document.querySelectorAll('.settings-tab')].find(x=>x.getAttribute('onclick')?.includes("'"+key+"'"));if(tab){tab.classList.add('active');document.querySelector('[data-settings="'+key+'"]')?.classList.add('active')}}}
 render();
+
+syncBackend();

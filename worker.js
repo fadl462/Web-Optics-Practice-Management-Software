@@ -66,7 +66,7 @@ async function requireIdentity(request, env) {
   }
 
   if (!staff || !staff.active) return { response: error('Your account is not authorized for OptiFlow.', 403, 'NOT_AUTHORIZED') };
-  return { identity, staff };
+  return { identity: { email, name: displayName }, staff };
 }
 
 function requirePermission(staff, action) {
