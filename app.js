@@ -78,8 +78,58 @@ function dashboard(){
  let openTasks=state.tasks.filter(t=>!t.done).length;
  return '<div class="page-head"><div><h1>Good evening, Dr. Bennett</h1><p>Tuesday, 6 October 2026 · Here is what needs your attention today.</p></div><div class="actions"><button class="btn" onclick="openModal(\'appointment\')">Schedule appointment</button><button class="btn" onclick="openModal(\'schedule\')">+ Schedule recall</button><button class="btn primary" onclick="openModal(\'patient\')">+ New patient</button></div></div>'+intelligencePanel()+'<div class="grid stats"><div class="card stat"><div class="stat-top">Patients <div class="stat-icon">♙</div></div><h2>'+state.patients.length+'</h2><p><span class="positive">+12%</span> vs last month</p></div><div class="card stat"><div class="stat-top">Recalls due <div class="stat-icon">◷</div></div><h2>'+(due+12)+'</h2><p><span class="negative">'+due+' ready</span> for outreach</p></div><div class="card stat"><div class="stat-top">Messages <div class="stat-icon">✉</div></div><h2>38</h2><p><span class="positive">31 delivered</span> · 7 pending</p></div><div class="card stat"><div class="stat-top">Open tasks <div class="stat-icon">✓</div></div><h2>'+openTasks+'</h2><p><span class="negative">'+state.tasks.filter(t=>!t.done&&t.priority==='High').length+' high priority</span></p></div></div><div class="grid two" style="margin-top:16px">'+appointmentsToday()+attentionPanel()+'</div><div class="grid two" style="margin-top:16px"><div class="card panel"><div class="panel-head"><h3>Recall automation</h3><span>Next run · 6:00 PM</span></div><div class="notice"><strong>Annual exam campaign is active.</strong><br>Patients due within 30 days are queued automatically. Staff can review, edit, pause or send manually.</div><div class="kpi-row" style="margin-top:18px"><div class="kpi"><span>Queued</span><strong>24</strong><div class="progress"><i style="width:62%"></i></div></div><div class="kpi"><span>Delivered</span><strong>148</strong><div class="progress"><i style="width:88%"></i></div></div><div class="kpi"><span>Booked</span><strong>19</strong><div class="progress"><i style="width:47%"></i></div></div></div></div><div class="card panel"><div class="panel-head"><h3>Recent activity</h3><span>Live</span></div><div class="timeline">'+(state.activity||[]).slice(0,4).map(e=>'<div class="event"><div class="dot">'+e.icon+'</div><div><strong>'+esc(e.title)+'</strong><p>'+esc(e.detail)+'</p></div><time>'+e.time+'</time></div>').join('')+'</div></div></div>';
 }
-function taskHTML(t){return `<div class="task"><button class="check ${t.done?'done':''}" onclick="toggleTask(${t.id})">${t.done?'✓':''}</button><div><strong>${esc(t.title)}</strong><p>${t.owner} · <span class="badge ${t.priority==='High'?'red':t.priority==='Low'?'gray':'blue'}">${t.priority}</span></p></div><div class="task-meta"><small>${t.due}</small></div></div>`}
-
+function taskUrgency(t){
+ let score=0,reasons=[];
+ if(t.done)return {label:'Completed',tone:'green',reason:'task closed'};
+ if(t.priority==='High'){score+=50;reasons.push('high priority')}
+ if(String(t.due).toLowerCase()==='today'){score+=35;reasons.push('due today')}
+ if(String(t.due).toLowerCase()==='tomorrow'){score+=15;reasons.push('due tomorrow')}
+ if(t.title.toLowerCase().match(/referral|clinical|abnormal|insurance/)){score+=15;reasons.push('patient-care dependency')}
+ if(score>=70)return {label:'Urgent',tone:'red',reason:reasons.slice(0,2).join(' · ')};
+ if(score>=40)return {label:'Priority',tone:'amber',reason:reasons.slice(0,2).join(' · ')};
+ return {label:'Routine',tone:'blue',reason:reasons[0]||'planned work'};
+}
+function taskPatient(t){
+ let found=state.patients.find(p=>t.title.toLowerCase().includes(p.name.toLowerCase()));
+ return found;
+}
+function taskHTML(t){
+ let u=taskUrgency(t),p=taskPatient(t);
+ return '<div id="task-'+t.id+'" class="task task-enhanced '+(t.done?'is-done':'')+'"><button class="check '+(t.done?'done':'')+'" onclick="toggleTask('+t.id+')">'+(t.done?'✓':'')+'</button><div class="task-main"><div class="task-title-row"><strong>'+esc(t.title)+'</strong><span class="badge '+u.tone+'">'+u.label+'</span></div><p>'+esc(t.owner)+' · <span class="badge '+(t.priority==='High'?'red':t.priority==='Low'?'gray':'blue')+'">'+esc(t.priority)+'</span>'+(p?' · <button class="task-link" onclick="event.stopPropagation();openPatient(\''+p.id+'\')">'+esc(p.name)+'</button>':'')+'</p><span class="task-reason">'+esc(u.reason)+'</span></div><div class="task-meta"><small>'+esc(t.due)+'</small><button class="row-action" onclick="editTask('+t.id+')">Open</button></div></div>';
+}
+function taskInsight(){
+ let open=state.tasks.filter(t=>!t.done), urgent=open.filter(t=>taskUrgency(t).label==='Urgent'), high=open.filter(t=>t.priority==='High');
+ let focus=urgent[0]||high[0]||open[0];
+ let headline=urgent.length?urgent.length+' task'+(urgent.length===1?' requires':'s require')+' immediate attention.':high.length?high.length+' high-priority tasks should be cleared first.':'The practice task queue is under control.';
+ let detail=focus?'Start with “'+focus.title+'” — '+taskUrgency(focus).reason+'.':'No urgent task requires action right now.';
+ return '<div class="task-intelligence card"><div class="intel-icon">✦</div><div class="intel-copy"><div class="intel-label">OPTIFLOW WORK INTELLIGENCE</div><strong>'+headline+'</strong><p>'+detail+'</p></div><button class="btn" onclick="'+(focus?'focusTask('+focus.id+')':'toast(\'Task queue reviewed\')')+'">'+(focus?'Focus task':'Review queue')+'</button></div>';
+}
+function taskOwnerCounts(){
+ let counts={};state.tasks.filter(t=>!t.done).forEach(t=>counts[t.owner]=(counts[t.owner]||0)+1);
+ return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+}
+function tasks(){
+ let filter=window.taskFilter||'all', term=String(window.taskSearch||'').toLowerCase();
+ let list=state.tasks.filter(t=>(t.title+' '+t.owner+' '+t.priority+' '+t.due).toLowerCase().includes(term));
+ if(filter==='open')list=list.filter(t=>!t.done);
+ if(filter==='high')list=list.filter(t=>!t.done&&t.priority==='High');
+ if(filter==='completed')list=list.filter(t=>t.done);
+ if(filter==='today')list=list.filter(t=>!t.done&&String(t.due).toLowerCase()==='today');
+ let open=state.tasks.filter(t=>!t.done),high=open.filter(t=>t.priority==='High'),done=state.tasks.filter(t=>t.done),today=open.filter(t=>String(t.due).toLowerCase()==='today');
+ let owners=taskOwnerCounts(),lead=owners[0];
+ return '<div class="page-head"><div><h1>Tasks</h1><p>Turn practice priorities into clear, accountable work.</p></div><div class="actions"><button class="btn" onclick="setTaskFilter(\'today\')">Today’s focus</button><button class="btn primary" onclick="openModal(\'task\')">+ New task</button></div></div>'+
+ taskInsight()+
+ '<div class="grid stats task-stats"><div class="card stat"><div class="stat-top">Open <div class="stat-icon">○</div></div><h2>'+open.length+'</h2><p>Across the practice</p></div><div class="card stat"><div class="stat-top">High priority <div class="stat-icon">!</div></div><h2>'+high.length+'</h2><p><span class="negative">'+today.length+' due today</span></p></div><div class="card stat"><div class="stat-top">Completed <div class="stat-icon">✓</div></div><h2>'+done.length+'</h2><p>Recently closed</p></div><div class="card stat"><div class="stat-top">Workload <div class="stat-icon">↔</div></div><h2>'+(lead?lead[1]:0)+'</h2><p>'+esc(lead?lead[0]:'No open owner')+' · most assigned</p></div></div>'+
+ '<div class="card task-toolbar"><div class="task-search"><span>⌕</span><input value="'+esc(window.taskSearch||'')+'" oninput="window.taskSearch=this.value;render()" placeholder="Search tasks, owners, patients or priorities…"></div><div class="task-filters"><button class="btn '+(filter==='all'?'active':'')+'" onclick="setTaskFilter(\'all\')">All</button><button class="btn '+(filter==='open'?'active':'')+'" onclick="setTaskFilter(\'open\')">Open</button><button class="btn '+(filter==='today'?'active':'')+'" onclick="setTaskFilter(\'today\')">Today</button><button class="btn '+(filter==='high'?'active':'')+'" onclick="setTaskFilter(\'high\')">High priority</button><button class="btn '+(filter==='completed'?'active':'')+'" onclick="setTaskFilter(\'completed\')">Completed</button></div></div>'+
+ '<div class="grid two task-lower"><div class="card panel"><div class="panel-head"><div><h3>Practice task list</h3><span>'+list.length+' tasks in this view</span></div><span>Live status</span></div><div class="task-list">'+(list.length?list.map(taskHTML).join(''):'<div class="empty"><strong>No tasks found.</strong><br>Try another filter or search term.</div>')+'</div></div>'+
+ '<div class="card panel"><div class="panel-head"><div><h3>Workload intelligence</h3><span>Open tasks by owner</span></div></div><div class="workload-list">'+(owners.length?owners.map((o,i)=>'<div class="workload-row"><div class="avatar">'+initials(o[0])+'</div><div><strong>'+esc(o[0])+'</strong><span>'+o[1]+' open task'+(o[1]===1?'':'s')+'</span></div><div class="workload-bar"><i style="width:'+Math.min(100,Math.round(o[1]/Math.max(1,owners[0][1])*100))+'%"></i></div></div>').join(''):'<div class="empty">No open work assigned.</div>')+'</div><div class="notice task-note"><strong>Smart suggestion</strong><br>'+(lead&&lead[1]>=3?'Consider redistributing lower-priority work from '+esc(lead[0])+' to another team member.':'Workload is reasonably distributed across the current queue.')+'</div></div></div>';
+}
+function setTaskFilter(filter){window.taskFilter=filter;render();}
+function focusTask(id){
+ window.taskFilter='all';window.taskSearch='';
+ const el=document.getElementById('task-'+id);if(el){el.scrollIntoView({behavior:'smooth',block:'center'});el.classList.add('task-focus');setTimeout(()=>el.classList.remove('task-focus'),1400);}else render();
+}
+function editTask(id){let t=state.tasks.find(x=>x.id===id);if(t)toast('Task: '+t.title);}
 function patientAttention(p){
  if(p.status==='Recall due') return {label:'Recall due',tone:'amber',detail:'Annual follow-up needs scheduling'};
  if((p.notes||'').toLowerCase().includes('glaucoma')) return {label:'Clinical flag',tone:'red',detail:'Family history of glaucoma'};
@@ -215,7 +265,16 @@ function openModal(type,arg=''){let title=type==='patient'?'Add patient':type===
 function closeModal(){document.getElementById('modal')?.remove()}
 function submitModal(type){if(type==='patient'){const name=((document.getElementById('f1')?.value||'New')+' '+(document.getElementById('f2')?.value||'Patient')).trim();state.patients.unshift({id:'P-'+Math.floor(10000+Math.random()*89999),name,dob:document.getElementById('f3')?.value||'Not provided',phone:document.getElementById('f4')?.value||'—',email:document.getElementById('f5')?.value||'—',insurance:document.getElementById('f6')?.value||'Self-pay',policy:document.getElementById('f7')?.value||'—',status:'Active',lastVisit:'New record',nextRecall:document.getElementById('f8')?.value||'Not set',rx:{od:'—',os:'—',add:'—'},notes:document.getElementById('f9')?.value||''});toast('Patient record created')}else if(type==='task'){state.tasks.unshift({id:Date.now(),title:document.getElementById('f1').value||'New task',owner:'Sarah L.',due:document.getElementById('f3').value||'Today',priority:document.getElementById('f2').value,done:false});toast('Task created')}else if(type==='message'){state.messages.push({patient:'Amelia Carter',time:'Just now',text:'Message sent successfully.',mine:true,channel:'SMS'});toast('Message sent')}else if(type==='schedule'){state.recalls.unshift({id:Date.now(),patient:document.getElementById('f1').value,type:'Annual eye examination',due:'Scheduled',channel:'SMS + Email',status:'Scheduled'});toast('Recall scheduled')}else toast('Appointment booked');save();closeModal();render()}
 function sendRecall(id){let r=state.recalls.find(x=>x.id===id);if(r){r.status='Sent';save();toast(`Recall sent to ${r.patient}`);render()}}
-function toggleTask(id){let t=state.tasks.find(x=>x.id===id);if(t){t.done=!t.done;save();render();}}
+function toggleTask(id){
+ let t=state.tasks.find(x=>x.id===id);
+ if(t){
+  t.done=!t.done;
+  state.activity=state.activity||[];
+  state.activity.unshift({icon:t.done?'✓':'◷',title:t.done?'Task completed':'Task reopened',detail:t.title,time:'Just now'});
+  state.activity=state.activity.slice(0,12);
+  save();render();toast(t.done?'Task completed':'Task reopened');
+ }
+}
 function quickMessage(){
  const el=document.getElementById('quickMsg'); if(!el?.value.trim())return;
  const patient=window.selectedConversation||'Amelia Carter';
