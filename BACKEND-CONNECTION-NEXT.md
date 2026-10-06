@@ -73,3 +73,7 @@ The browser never connects directly to D1. Patient CRUD and other sensitive oper
 ## Important limitation
 
 This stage does not yet provide real SMS/email delivery. Recall sending and messages are queued in the database. Provider credentials and delivery webhooks should be added in the next communications stage.
+
+
+### D1 schema migration
+The package now includes `0001_initial.sql` under the package root. Keep it with the deployment files. Your `wrangler*.jsonc` points to `migrations`; if your repository already has the same migration, do not create a duplicate migration. Apply the migration to the intended D1 database before testing the API if the schema has not already been created.

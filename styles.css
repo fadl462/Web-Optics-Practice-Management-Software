@@ -104,3 +104,33 @@
 .backend-pill{display:inline-flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #e5ecef;border-radius:999px;background:#fbfcfc;color:#7a8896;font-size:9px;font-weight:800;white-space:nowrap}.backend-pill i{width:6px;height:6px;border-radius:50%;background:#d6a243}.backend-pill.connected{background:#eefaf6;border-color:#d9eee8;color:#19775f}.backend-pill.connected i{background:#18a477}.backend-pill.offline{background:#fff8ef;border-color:#f1e1c6;color:#946817}
 .sidebar{isolation:isolate}.sidebar .nav-title,.sidebar .nav,.sidebar .sidebar-foot{position:relative;z-index:2}.sidebar .nav button{width:100%;min-height:40px}.sidebar-foot{background:linear-gradient(180deg,rgba(12,32,53,.94),#0c2035)}
 @media(max-width:760px){.backend-pill{display:none}.sidebar{display:none}.main{margin-left:0}.mobile-nav{display:grid;position:fixed;left:0;right:0;bottom:0;height:62px;background:#fff;border-top:1px solid var(--line);z-index:60;grid-template-columns:repeat(5,1fr);padding-bottom:env(safe-area-inset-bottom)}.mobile-nav button{border:0;background:#fff;color:#8b97a4;font-size:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}.mobile-nav button span{font-size:15px}.mobile-nav button.active{color:var(--teal);font-weight:800}.content{padding:18px 16px 84px}}
+
+/* OptiFlow production layout hardening */
+html,body,#app{min-height:100%;}
+body{min-height:100dvh;overflow-x:hidden;}
+.app{min-height:100dvh;align-items:stretch;}
+.sidebar{
+  position:fixed !important;
+  inset:0 auto 0 0 !important;
+  width:250px !important;
+  height:100vh !important;
+  height:100dvh !important;
+  min-height:100vh !important;
+  max-height:100vh !important;
+  max-height:100dvh !important;
+  overflow-y:auto !important;
+  overflow-x:hidden !important;
+  display:flex !important;
+  flex-direction:column !important;
+  align-self:stretch !important;
+  z-index:100 !important;
+}
+.sidebar .brand{flex:none;}
+.sidebar .nav-title{flex:none;}
+.sidebar .nav{flex:none;display:grid;}
+.sidebar .sidebar-foot{margin-top:auto !important;flex:none;}
+.main{min-height:100dvh;}
+.backend-pill{max-width:min(520px,42vw);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.backend-pill.offline{cursor:pointer;}
+.backend-retry{border:0;background:transparent;color:#8a5b08;font-weight:800;font-size:9px;margin-left:7px;padding:0;text-decoration:underline;cursor:pointer;}
+@media(max-width:760px){.backend-pill{display:none!important}.main{min-height:100dvh}.sidebar{display:none!important}}

@@ -88,7 +88,7 @@ function dbMessage(row){return {id:row.id,patientId:row.patient_id,patient:[row.
 function dbAppointment(row){return {id:row.id,patientId:row.patient_id,patient:[row.first_name,row.last_name].filter(Boolean).join(' '),time:row.start_at,visit:row.visit_type,provider:row.provider||'—',status:row.status,date:row.start_at};}
 async function syncBackend(){
  try{
-  const health=await apiRequest('health');
+  await apiRequest('health');
   const [ps,rs,ts,ms,as]=await Promise.all([apiRequest('patients'),apiRequest('recalls'),apiRequest('tasks'),apiRequest('conversations'),apiRequest('appointments')]);
   state.patients=(ps.data||[]).map(dbPatient);
   state.recalls=(rs.data||[]).map(dbRecall);
@@ -101,7 +101,8 @@ async function syncBackend(){
   render();
  }catch(e){
   state.backendConnected=false;
-  backend={status:'offline',message:'Secure records unavailable — showing local workspace data'};
+  const detail=String(e?.message||'Connection failed').replace(/\s+/g,' ').slice(0,120);
+  backend={status:'offline',message:'Secure records unavailable — '+detail};
   render();
  }
 }
@@ -119,7 +120,7 @@ function resetDemoData(){localStorage.removeItem('optiflow_state');location.hash
 window.resetDemoData=resetDemoData;
 
 function nav(){return `<aside class="sidebar"><div class="brand"><div class="logo">◉</div><div><strong>OptiFlow</strong><small>Practice Management</small></div></div><div class="nav-title">Workspace</div><div class="nav">${[['dashboard','▦','Dashboard'],['patients','♙','Patients'],['recalls','◷','Recalls'],['messages','✉','Messages'],['tasks','✓','Tasks']].map(x=>`<button class="${current===x[0]?'active':''}" onclick="window.go('${x[0]}')"><span class="ico">${x[1]}</span>${x[2]}</button>`).join('')}</div><div class="nav-title">Practice</div><div class="nav"><button class="${current==='settings'?'active':''}" onclick="window.go('settings')"><span class="ico">⚙</span>Settings</button><button class="${current==='reports'?'active':''}" onclick="window.go('reports')"><span class="ico">▥</span>Reports</button></div><div class="sidebar-foot"><div class="user-mini"><div class="avatar">${state.user.initials}</div><div><strong>${state.user.name}</strong><span>${state.user.role}</span></div></div></div></aside>`}
-function topbar(){return `<header class="topbar"><div class="crumb">OptiFlow / <strong>${current[0].toUpperCase()+current.slice(1)}</strong></div><div class="top-actions"><span class="backend-pill ${backend.status==='connected'?'connected':'offline'}"><i></i>${esc(backend.message)}</span><button class="icon-btn" onclick="toast('No new notifications')">♢</button><span class="role">${state.user.role}</span><div class="avatar">${state.user.initials}</div></div></header>`}
+function topbar(){return `<header class="topbar"><div class="crumb">OptiFlow / <strong>${current[0].toUpperCase()+current.slice(1)}</strong></div><div class="top-actions"><span class="backend-pill ${backend.status==='connected'?'connected':'offline'}" title="${esc(backend.message)}"><i></i>${esc(backend.message)}${backend.status!=='connected'?'<button class="backend-retry" onclick="syncBackend()">Retry</button>':''}</span><button class="icon-btn" onclick="toast('No new notifications')">♢</button><span class="role">${state.user.role}</span><div class="avatar">${state.user.initials}</div></div></header>`}
 function layout(body){return `<div class="app">${nav()}<main class="main">${topbar()}<section class="content">${body}</section></main><nav class="mobile-nav">${[['dashboard','▦','Home'],['patients','♙','Patients'],['recalls','◷','Recalls'],['messages','✉','Messages'],['tasks','✓','Tasks']].map(x=>`<button class="${current===x[0]?'active':''}" onclick="go('${x[0]}')"><span>${x[1]}</span>${x[2]}</button>`).join('')}</nav></div>`}
 function patientRows(list){return list.map(p=>`<tr onclick="openPatient('${p.id}')" style="cursor:pointer"><td><div class="patient-cell"><div class="avatar">${initials(p.name)}</div><div><strong>${esc(p.name)}</strong><span>${p.id}</span></div></div></td><td>${p.dob}</td><td>${p.phone}</td><td>${esc(p.insurance)}</td><td><span class="badge ${p.status==='Active'?'green':'amber'}">${p.status}</span></td><td>${p.nextRecall}</td></tr>`).join('')}
 function intelligencePanel(){
