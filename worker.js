@@ -45,11 +45,15 @@ function allowedOrigin(request) {
 }
 
 async function requireIdentity(request, env, ctx) {
-  // Cloudflare Access is the production authentication boundary.
-  // The Worker trusts identity only when Access has authenticated the request.
-  if (!ctx.access) return { response: error('Authentication required.', 401, 'AUTH_REQUIRED') };
-  const identity = await ctx.access.getIdentity();
-  const email = String(identity?.email || '').trim().toLowerCase();
+  // Cloudflare Access must protect the API hostname. Access injects this
+  // verified identity header after authentication. Do not expose the API
+  // directly without an Access policy in front of it.
+  const email = String(request.headers.get('Cf-Access-Authenticated-User-Email') || '').trim().toLowerCase();
+  if (!email) return { response: error('Authentication required.', 401, 'AUTH_REQUIRED') };
+  const identity = {
+    email,
+    name: request.headers.get('Cf-Access-Authenticated-User-Name') || email,
+  };
   if (!email) return { response: error('Authenticated identity is missing an email.', 401, 'IDENTITY_MISSING') };
 
   let staff = await env.DB.prepare(

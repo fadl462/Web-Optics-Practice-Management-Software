@@ -9,8 +9,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "optiflow-production",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_name": "optiflow-production-db",
+      "database_id": "d9dbfc4d-60ae-4d25-a896-029b1c5f41a2",
       "migrations_dir": "migrations"
     }
   ],
