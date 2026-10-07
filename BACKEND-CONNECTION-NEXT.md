@@ -133,3 +133,22 @@ The generic provider adapter sends `{ to, body, channel, messageId }` with `Auth
 Apply `migrations/0003_messaging_delivery.sql` after the first two migrations.
 
 Never run the demo seed against a live production database containing real patient data.
+
+
+## Critical Build v7 — Administration, privacy and navigation refinement
+
+v7 is the next stabilization wave and should be deployed after v6.
+
+- Sidebar navigation typography is restored to a readable compact size (13px) instead of the overly small 11px treatment.
+- Staff administration now supports secure role/active-status updates through `PATCH /api/staff/:id`, with self-deactivation blocked.
+- Audit logs support bounded `limit` plus optional action/actor filtering for Practice Managers.
+- Recall automation now checks explicit communication opt-out preferences before creating outbound SMS/email messages and records blocked attempts in the recall event trail.
+- Reports no longer use a hard-coded "19 booked" value; booking counts are derived from the current appointment dataset.
+
+### v7 security rule
+
+Communication consent is enforced server-side. A browser/UI toggle is not considered sufficient authorization to contact a patient. Explicit opt-outs must block the corresponding outbound channel in the automation path.
+
+### Deployment note
+
+No new D1 migration is required for the v7 changes. They use the existing v1–v3 schema. Continue to apply the migrations in order on a new D1 database.

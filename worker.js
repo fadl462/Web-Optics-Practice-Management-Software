@@ -124,8 +124,10 @@ async function runRecallAutomation(env) {
 
   // 2) Queue outbound messages only for recalls explicitly approved/queued by staff.
   const queuedRecalls = await env.DB.prepare(
-    `SELECT r.*, p.first_name, p.last_name, p.phone, p.email
+    `SELECT r.*, p.first_name, p.last_name, p.phone, p.email,
+            cp.sms_opt_in, cp.email_opt_in
      FROM recalls r JOIN patients p ON p.id=r.patient_id
+     LEFT JOIN communication_preferences cp ON cp.patient_id=r.patient_id
      WHERE r.status='Queued' LIMIT 250`
   ).all();
   for (const recall of queuedRecalls.results || []) {
@@ -135,6 +137,12 @@ async function runRecallAutomation(env) {
     const channels = String(recall.channel || 'SMS').split('+').map(x => x.trim()).filter(Boolean);
     for (const channelName of channels) {
       const channel = channelName.toLowerCase().startsWith('email') ? 'Email' : 'SMS';
+      const optedOut = channel === 'Email' ? recall.email_opt_in === 0 : recall.sms_opt_in === 0;
+      if (optedOut) {
+        await env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,error_code,error_message,created_at) VALUES (?,?,?,?,?,?,?)`)
+          .bind(id('RCLE'), recall.id, 'message_blocked', 'Blocked', 'COMMUNICATION_OPT_OUT', `${channel} communication opt-out is active.`, timestamp).run();
+        continue;
+      }
       const destination = channel === 'Email' ? recall.email : recall.phone;
       if (!destination) continue;
       const messageId = id('MSG');
@@ -453,6 +461,23 @@ async function api(request, env, ctx) {
     return json({data:{id:staffId}},201);
   }
 
+  const staffMatch = path.match(/^staff\/([^/]+)$/);
+  if (staffMatch && method === 'PATCH') {
+    const denied = requirePermission(staff, 'admin'); if (denied) return denied;
+    const staffId = decodeURIComponent(staffMatch[1]);
+    let input; try { input = await body(request); } catch (e) { return error(e.message); }
+    const entries = Object.entries(input || {}).filter(([key]) => ['name','role','active'].includes(key));
+    if (!entries.length) return error('No editable staff fields supplied.');
+    if (entries.some(([key,value]) => key === 'role' && !ROLES[String(value)])) return error('Invalid role.');
+    if (staffId === staff.id && entries.some(([key,value]) => key === 'active' && !value)) return error('You cannot deactivate your own active account.', 409, 'SELF_DEACTIVATION_BLOCKED');
+    const sets = entries.map(([key]) => `${key}=?`).join(', ');
+    const values = entries.map(([,value]) => typeof value === 'boolean' ? (value ? 1 : 0) : value);
+    values.push(now(), staffId);
+    await env.DB.prepare(`UPDATE staff SET ${sets}, updated_at=? WHERE id=?`).bind(...values).run();
+    await audit(env, staff, request, 'staff.updated', 'staff', staffId, { fields: entries.map(([key]) => key) });
+    return json({ data: { id: staffId } });
+  }
+
   // ---------- Dashboard summary ----------
   if (path === 'dashboard/summary' && method === 'GET') {
     const denied=requirePermission(staff,'view'); if(denied) return denied;
@@ -616,8 +641,15 @@ async function api(request, env, ctx) {
   // ---------- Audit ----------
   if (path === 'audit' && method === 'GET') {
     const denied = requirePermission(staff, 'admin'); if (denied) return denied;
-    const result = await env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events ORDER BY created_at DESC LIMIT 250`).all();
-    return json({ data: result.results });
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 250), 1), 500);
+    const action = (url.searchParams.get('action') || '').trim();
+    const actor = (url.searchParams.get('actor') || '').trim().toLowerCase();
+    let result;
+    if (action && actor) result = await env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events WHERE action LIKE ? AND lower(actor_email) LIKE ? ORDER BY created_at DESC LIMIT ${limit}`).bind(`%${action}%`, `%${actor}%`).all();
+    else if (action) result = await env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events WHERE action LIKE ? ORDER BY created_at DESC LIMIT ${limit}`).bind(`%${action}%`).all();
+    else if (actor) result = await env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events WHERE lower(actor_email) LIKE ? ORDER BY created_at DESC LIMIT ${limit}`).bind(`%${actor}%`).all();
+    else result = await env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events ORDER BY created_at DESC LIMIT ${limit}`).all();
+    return json({ data: result.results || [] });
   }
 
   return error('API route not found.', 404, 'NOT_FOUND');

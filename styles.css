@@ -145,3 +145,13 @@ body{min-height:100dvh;overflow-x:hidden;}
 .sidebar .brand{padding-bottom:24px}
 .sidebar .sidebar-foot{padding-top:12px}
 .backend-pill{max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* OptiFlow v7 navigation refinement: readable compact sidebar typography */
+.sidebar .nav button{font-size:13px;line-height:1.25;padding:10px 12px;min-height:42px;}
+.sidebar .nav .ico{width:18px;font-size:13px;}
+.sidebar .nav{gap:4px;}
+.sidebar .nav-title{font-size:9px;margin-top:16px;margin-bottom:8px;}
+.sidebar .brand strong{font-size:17px;}
+.sidebar .sidebar-foot .user-mini strong{font-size:12px;}
+.sidebar .sidebar-foot .user-mini span{font-size:10px;}
+@media(max-width:760px){.sidebar .nav button{font-size:13px;}}
