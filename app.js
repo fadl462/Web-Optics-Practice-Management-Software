@@ -88,14 +88,24 @@ function dbMessage(row){return {id:row.id,patientId:row.patient_id,patient:[row.
 function dbAppointment(row){return {id:row.id,patientId:row.patient_id,patient:[row.first_name,row.last_name].filter(Boolean).join(' '),time:row.start_at,visit:row.visit_type,provider:row.provider||'—',status:row.status,date:row.start_at};}
 async function syncBackend(){
  try{
-  await apiRequest('health');
-  const [ps,rs,ts,ms,as,ss]=await Promise.all([apiRequest('patients'),apiRequest('recalls'),apiRequest('tasks'),apiRequest('conversations'),apiRequest('appointments'),apiRequest('settings')]);
+  const health=await apiRequest('health');
+  if(!health.authorized){
+   state.backendConnected=false;
+   const msg=health.bootstrapConfigured
+    ? (health.bootstrapMatches?'OptiFlow is provisioning your manager account — retry in a moment.':'Access is authenticated, but this account is not provisioned for OptiFlow.')
+    : 'Access is authenticated, but the Worker bootstrap secret is not configured.';
+   backend={status:'offline',message:msg};
+   render();
+   return;
+  }
+  const [ps,rs,ts,ms,as,ss,ds]=await Promise.all([apiRequest('patients'),apiRequest('recalls'),apiRequest('tasks'),apiRequest('conversations'),apiRequest('appointments'),apiRequest('settings'),apiRequest('dashboard/summary')]);
   state.patients=(ps.data||[]).map(dbPatient);
   state.recalls=(rs.data||[]).map(dbRecall);
   state.tasks=(ts.data||[]).map(dbTask);
   state.messages=(ms.data||[]).map(dbMessage);
   state.appointments=(as.data||[]).map(dbAppointment);
   if(ss?.data&&Object.keys(ss.data).length){state.settings=Object.assign({},state.settings||{},ss.data);}
+  state.dashboardSummary=ds?.data||null;
   state.backendConnected=true;
   backend={status:'connected',message:'Secure records connected'};
   if(selectedPatient) selectedPatient=state.patients.find(p=>p.id===selectedPatient.id)||null;

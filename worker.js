@@ -101,18 +101,35 @@ async function api(request, env, ctx) {
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   if (!allowedOrigin(request)) return error('Cross-origin request blocked.', 403, 'ORIGIN_BLOCKED');
 
-  const auth = await requireIdentity(request, env);
-  if (auth.response) return auth.response;
-  const { staff } = auth;
-
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
   const method = request.method.toUpperCase();
 
-  // Health is intentionally authenticated because it reveals deployment state.
+  // Health is Access-authenticated but does not require an OptiFlow staff record.
+  // This makes first-time setup diagnosable without exposing the configured admin email.
   if (path === 'health' && method === 'GET') {
-    return json({ ok: true, service: 'optiflow-api', user: staff.email, role: staff.role });
+    const accessEmail = String(request.headers.get('Cf-Access-Authenticated-User-Email') || '').trim().toLowerCase();
+    if (!accessEmail) return error('Authentication required.', 401, 'AUTH_REQUIRED');
+    if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
+    const staff = await env.DB.prepare(
+      `SELECT id,email,name,role,active FROM staff WHERE lower(email)=? LIMIT 1`
+    ).bind(accessEmail).first();
+    const bootstrapConfigured = Boolean(String(env.BOOTSTRAP_ADMIN_EMAIL || '').trim());
+    const bootstrapMatches = bootstrapConfigured && accessEmail === String(env.BOOTSTRAP_ADMIN_EMAIL).trim().toLowerCase();
+    return json({
+      ok: true,
+      service: 'optiflow-api',
+      accessAuthenticated: true,
+      authorized: Boolean(staff && staff.active) || bootstrapMatches,
+      bootstrapConfigured,
+      bootstrapMatches,
+      role: staff?.role || (bootstrapMatches ? 'Practice Manager' : null)
+    });
   }
+
+  const auth = await requireIdentity(request, env);
+  if (auth.response) return auth.response;
+  const { staff } = auth;
 
   // ---------- Patients ----------
   if (path === 'patients' && method === 'GET') {

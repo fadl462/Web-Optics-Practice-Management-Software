@@ -136,3 +136,12 @@ body{min-height:100dvh;overflow-x:hidden;}
 @media(max-width:760px){.backend-pill{display:none!important}.main{min-height:100dvh}.sidebar{display:none!important}}
 
 .clinical-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}.clinical-actions .row-action{font-size:10px}.backend-help{font-size:10px;color:var(--muted);margin-left:6px}
+
+
+/* v4 navigation density */
+.sidebar .nav button{font-size:10px;min-height:36px;padding:8px 11px;gap:9px}
+.sidebar .nav .ico{font-size:12px;width:17px}
+.sidebar .nav-title{font-size:8px;margin:12px 9px 6px;letter-spacing:1.25px}
+.sidebar .brand{padding-bottom:24px}
+.sidebar .sidebar-foot{padding-top:12px}
+.backend-pill{max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
