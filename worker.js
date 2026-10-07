@@ -382,10 +382,10 @@ async function api(request, env, ctx) {
     const patient = await env.DB.prepare(`SELECT * FROM patients WHERE id=?`).bind(patientId).first();
     if (!patient) return error('Patient not found.', 404, 'NOT_FOUND');
     const [insurance, prescriptions, history, allergies, medications, communicationPreferences, recalls, appointments, messages, tasks] = await Promise.all([
-      env.DB.prepare(`SELECT * FROM insurance_policies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
-      env.DB.prepare(`SELECT * FROM prescriptions WHERE patient_id=? ORDER BY prescribed_at DESC`).bind(patientId).all(),
-      env.DB.prepare(`SELECT * FROM medical_history WHERE patient_id=? ORDER BY event_date DESC, created_at DESC`).bind(patientId).all(),
-      env.DB.prepare(`SELECT * FROM allergies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
+      env.DB.prepare(`SELECT * FROM insurance_policies WHERE patient_id=? AND COALESCE(status,'Pending')!='Amended' ORDER BY updated_at DESC, created_at DESC`).bind(patientId).all(),
+      env.DB.prepare(`SELECT * FROM prescriptions WHERE patient_id=? ORDER BY prescribed_at DESC, created_at DESC`).bind(patientId).all(),
+      env.DB.prepare(`SELECT * FROM medical_history WHERE patient_id=? AND COALESCE(status,'Active')='Active' ORDER BY event_date DESC, created_at DESC`).bind(patientId).all(),
+      env.DB.prepare(`SELECT * FROM allergies WHERE patient_id=? AND COALESCE(status,'Active')='Active' ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM medications WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM communication_preferences WHERE patient_id=?`).bind(patientId).first(),
       env.DB.prepare(`SELECT id,type,due_date,channel,status,source,created_at,updated_at FROM recalls WHERE patient_id=? ORDER BY COALESCE(due_date,created_at) DESC LIMIT 100`).bind(patientId).all(),
@@ -465,6 +465,52 @@ async function api(request, env, ctx) {
     return json({ data: { id: recordId, patientId, section } }, 201);
   }
 
+  // ---------- Clinical record amendments (append-first, auditable) ----------
+  const amendMatch = path.match(/^patients\/([^/]+)\/(history|allergies|medications|prescriptions|insurance)\/([^/]+)\/amend$/);
+  if (amendMatch && method === 'POST') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const patientId = decodeURIComponent(amendMatch[1]);
+    const section = amendMatch[2];
+    const recordId = decodeURIComponent(amendMatch[3]);
+    const patient = await env.DB.prepare(`SELECT id FROM patients WHERE id=?`).bind(patientId).first();
+    if (!patient) return error('Patient not found.',404,'NOT_FOUND');
+    let input; try { input = await body(request); } catch(e) { return error(e.message); }
+    const timestamp=now(); const newId=id(section==='history'?'HIS':section==='allergies'?'ALG':section==='medications'?'MED':section==='prescriptions'?'RX':'INS');
+    if(section==='history'){
+      const old=await env.DB.prepare(`SELECT * FROM medical_history WHERE id=? AND patient_id=? AND COALESCE(status,'Active')='Active'`).bind(recordId,patientId).first();
+      if(!old)return error('Active history record not found.',404,'NOT_FOUND');
+      if(!String(input.category||'').trim()||!String(input.description||'').trim())return error('History category and description are required.');
+      await env.DB.prepare(`INSERT INTO medical_history (id,patient_id,event_date,category,description,created_by,created_at,status,supersedes_id,amended_by,amended_at) VALUES (?,?,?,?,?,?,?,'Active',?,?,?)`).bind(newId,patientId,input.eventDate||old.event_date, String(input.category).trim(),String(input.description).trim(),staff.id,timestamp,recordId,staff.id,timestamp).run();
+      await env.DB.prepare(`UPDATE medical_history SET status='Amended',amended_by=?,amended_at=? WHERE id=?`).bind(staff.id,timestamp,recordId).run();
+    } else if(section==='allergies'){
+      const old=await env.DB.prepare(`SELECT * FROM allergies WHERE id=? AND patient_id=? AND COALESCE(status,'Active')='Active'`).bind(recordId,patientId).first();
+      if(!old)return error('Active allergy record not found.',404,'NOT_FOUND');
+      if(!String(input.allergen||'').trim())return error('Allergen is required.');
+      await env.DB.prepare(`INSERT INTO allergies (id,patient_id,allergen,reaction,severity,created_at,status,supersedes_id,amended_by,amended_at) VALUES (?,?,?,?,?,?,'Active',?,?,?)`).bind(newId,patientId,String(input.allergen).trim(),input.reaction||null,input.severity||null,timestamp,recordId,staff.id,timestamp).run();
+      await env.DB.prepare(`UPDATE allergies SET status='Amended',amended_by=?,amended_at=? WHERE id=?`).bind(staff.id,timestamp,recordId).run();
+    } else if(section==='medications'){
+      const old=await env.DB.prepare(`SELECT * FROM medications WHERE id=? AND patient_id=? AND active=1`).bind(recordId,patientId).first();
+      if(!old)return error('Active medication record not found.',404,'NOT_FOUND');
+      if(!String(input.name||'').trim())return error('Medication name is required.');
+      await env.DB.prepare(`INSERT INTO medications (id,patient_id,name,dose,frequency,active,created_at,supersedes_id,amended_by,amended_at) VALUES (?,?,?,?,?,1,?,?,?,?,?)`).bind(newId,patientId,String(input.name).trim(),input.dose||null,input.frequency||null,timestamp,recordId,staff.id,timestamp).run();
+      await env.DB.prepare(`UPDATE medications SET active=0,amended_by=?,amended_at=? WHERE id=?`).bind(staff.id,timestamp,recordId).run();
+    } else if(section==='prescriptions'){
+      const old=await env.DB.prepare(`SELECT * FROM prescriptions WHERE id=? AND patient_id=? AND COALESCE(status,'Active')='Active'`).bind(recordId,patientId).first();
+      if(!old)return error('Active prescription record not found.',404,'NOT_FOUND');
+      if(!input.prescribedAt)return error('Prescription date is required.');
+      await env.DB.prepare(`INSERT INTO prescriptions (id,patient_id,prescribed_at,od_sphere,od_cylinder,od_axis,od_add,os_sphere,os_cylinder,os_axis,os_add,notes,created_by,created_at,status,supersedes_id,amended_by,amended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,? ,?,'Active',?,?,?)`).bind(newId,patientId,input.prescribedAt,input.odSphere||null,input.odCylinder||null,input.odAxis||null,input.odAdd||null,input.osSphere||null,input.osCylinder||null,input.osAxis||null,input.osAdd||null,input.notes||null,staff.id,timestamp,recordId,staff.id,timestamp).run();
+      await env.DB.prepare(`UPDATE prescriptions SET status='Amended',amended_by=?,amended_at=? WHERE id=?`).bind(staff.id,timestamp,recordId).run();
+    } else {
+      const old=await env.DB.prepare(`SELECT * FROM insurance_policies WHERE id=? AND patient_id=?`).bind(recordId,patientId).first();
+      if(!old)return error('Insurance policy not found.',404,'NOT_FOUND');
+      if(!String(input.provider||'').trim())return error('Insurance provider is required.');
+      await env.DB.prepare(`INSERT INTO insurance_policies (id,patient_id,provider,policy_number,member_id,status,effective_from,effective_to,created_at,updated_at,status_history,supersedes_id,amended_by,amended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(newId,patientId,String(input.provider).trim(),input.policyNumber||null,input.memberId||null,input.status||'Pending',input.effectiveFrom||old.effective_from||null,input.effectiveTo||old.effective_to||null,timestamp,timestamp,'Amended from '+recordId,recordId,staff.id,timestamp).run();
+      await env.DB.prepare(`UPDATE insurance_policies SET status='Amended',amended_by=?,amended_at=? WHERE id=?`).bind(staff.id,timestamp,recordId).run();
+    }
+    await audit(env,staff,request,'patient.clinical.amended',section,newId,{patientId,supersedesId:recordId});
+    return json({data:{id:newId,patientId,section,supersedesId:recordId}},201);
+  }
+
   // ---------- Recall / appointment / message status updates ----------
   const recallMatch = path.match(/^recalls\/([^/]+)$/);
   if (recallMatch && method === 'PATCH') {
@@ -488,6 +534,15 @@ async function api(request, env, ctx) {
     const allowed=['start_at','end_at','visit_type','provider','status'];
     const entries=Object.entries(input).filter(([k])=>allowed.includes(k));
     if(!entries.length) return error('No editable appointment fields supplied.');
+    const currentAppt=await env.DB.prepare(`SELECT * FROM appointments WHERE id=?`).bind(appointmentId).first();
+    if(!currentAppt) return error('Appointment not found.',404,'NOT_FOUND');
+    const next={...currentAppt}; for(const [k,v] of entries) next[k]=v;
+    const activeStatuses=['Pending','Confirmed','Checked in'];
+    if(next.status!=='Cancelled' && next.status!=='No-show' && next.start_at && next.provider){
+      const conflict=await env.DB.prepare(`SELECT id FROM appointments WHERE id<>? AND provider=? AND status IN ('Pending','Confirmed','Checked in') AND start_at < COALESCE(?, datetime(?, '+30 minutes')) AND COALESCE(end_at, datetime(start_at, '+30 minutes')) > ? LIMIT 1`)
+        .bind(appointmentId,next.provider,next.end_at,next.start_at,next.start_at).first();
+      if(conflict) return error('The provider already has an overlapping appointment.',409,'APPOINTMENT_CONFLICT');
+    }
     const sets=entries.map(([k])=>`${k}=?`).join(', '); const values=entries.map(([,v])=>v); values.push(now(),appointmentId);
     await env.DB.prepare(`UPDATE appointments SET ${sets}, updated_at=? WHERE id=?`).bind(...values).run();
     await audit(env,staff,request,'appointment.updated','appointment',appointmentId,{fields:entries.map(([k])=>k)});
@@ -777,9 +832,15 @@ async function api(request, env, ctx) {
     const denied = requirePermission(staff, 'create'); if (denied) return denied;
     let input; try { input = await body(request); } catch (e) { return error(e.message); }
     if (!input.patientId || !input.startAt) return error('Patient and start time are required.');
+    const provider=String(input.provider || staff.name).trim();
+    const endAt=input.endAt || null;
+    if(provider){
+      const conflict=await env.DB.prepare(`SELECT id FROM appointments WHERE provider=? AND status IN ('Pending','Confirmed','Checked in') AND start_at < COALESCE(?, datetime(?, '+30 minutes')) AND COALESCE(end_at, datetime(start_at, '+30 minutes')) > ? LIMIT 1`).bind(provider,endAt,input.startAt,input.startAt).first();
+      if(conflict) return error('The provider already has an overlapping appointment.',409,'APPOINTMENT_CONFLICT');
+    }
     const appointmentId = id('APT'); const timestamp = now();
     await env.DB.prepare(`INSERT INTO appointments (id,patient_id,start_at,end_at,visit_type,provider,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?)`)
-      .bind(appointmentId, input.patientId, input.startAt, input.endAt || null, input.visitType || 'Eye examination', input.provider || staff.name, 'Pending', timestamp, timestamp).run();
+      .bind(appointmentId, input.patientId, input.startAt, endAt, input.visitType || 'Eye examination', provider, 'Pending', timestamp, timestamp).run();
     await audit(env, staff, request, 'appointment.created', 'appointment', appointmentId);
     return json({ data: { id: appointmentId } }, 201);
   }

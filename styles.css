@@ -178,3 +178,13 @@ body{min-height:100dvh;overflow-x:hidden;}
 .timeline-card .event>div:nth-child(2){min-width:0}
 .timeline-type{display:inline-flex;margin-top:5px;padding:3px 7px;border-radius:999px;background:#f1f5f8;color:#6d7d8f;font-size:9px;font-weight:700;letter-spacing:.2px}
 .timeline-card .event p{max-width:760px;white-space:normal;word-break:break-word}
+
+/* Calendar / scheduling */
+.calendar-panel{overflow:auto}.calendar-grid{display:grid;gap:10px;min-width:760px}.calendar-week{grid-template-columns:repeat(7,minmax(140px,1fr))}.calendar-day{background:#f8fafb;border:1px solid var(--line);border-radius:13px;min-height:360px}.calendar-day-head{padding:12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.calendar-day-head strong{font-size:11px;text-transform:uppercase;letter-spacing:.5px}.calendar-day-head span{font-size:10px;color:var(--muted)}.calendar-events{padding:9px;display:grid;gap:8px}.calendar-event{background:#fff;border:1px solid #dfe8ed;border-left:3px solid var(--teal);border-radius:10px;padding:9px;box-shadow:0 4px 12px rgba(16,36,61,.04)}.calendar-event strong{font-size:10px;display:block}.calendar-event span{font-size:9px;color:var(--muted);display:block;margin-top:3px}.calendar-event select{margin-top:7px;width:100%;font-size:9px;padding:6px;border:1px solid var(--line);border-radius:7px;background:#fff}.calendar-empty{font-size:10px;color:#9aa7b5;padding:18px 6px;text-align:center}.calendar-day:first-child .calendar-day-head{color:var(--teal)}.appointment-status-btn{border:0;cursor:pointer;font:inherit}.calendar-day .calendar-event:hover{border-color:#b9ddd8}@media(max-width:1050px){.calendar-week{grid-template-columns:repeat(4,minmax(150px,1fr))}}
+
+/* v13 clinical safety controls */
+.safety-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.safety-item .row-action{margin-left:auto}
+.record-list-row{gap:14px}
+.record-list-row>div:first-child{min-width:0;flex:1}
+textarea{min-height:110px;resize:vertical}
