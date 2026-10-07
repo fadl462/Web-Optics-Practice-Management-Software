@@ -260,12 +260,7 @@ async function api(request, env, ctx) {
       authorized: Boolean(staff && staff.active) || bootstrapMatches,
       bootstrapConfigured,
       bootstrapMatches,
-      role: staff?.role || (bootstrapMatches ? 'Practice Manager' : null),
-      providers: {
-        smsConfigured: Boolean(String(env.SMS_PROVIDER_URL || '').trim() && String(env.SMS_PROVIDER_TOKEN || '').trim()),
-        emailConfigured: Boolean(String(env.EMAIL_PROVIDER_URL || '').trim() && String(env.EMAIL_PROVIDER_TOKEN || '').trim()),
-        webhookConfigured: Boolean(String(env.MESSAGE_WEBHOOK_SECRET || '').trim())
-      }
+      role: staff?.role || (bootstrapMatches ? 'Practice Manager' : null)
     });
   }
 
@@ -481,27 +476,6 @@ async function api(request, env, ctx) {
     await env.DB.prepare(`UPDATE staff SET ${sets}, updated_at=? WHERE id=?`).bind(...values).run();
     await audit(env, staff, request, 'staff.updated', 'staff', staffId, { fields: entries.map(([key]) => key) });
     return json({ data: { id: staffId } });
-  }
-
-  // ---------- Security & administration overview ----------
-  if (path === 'security/overview' && method === 'GET') {
-    const denied = requirePermission(staff, 'admin'); if (denied) return denied;
-    const [staffRows, auditRows] = await Promise.all([
-      env.DB.prepare(`SELECT id,email,name,role,active,created_at,updated_at FROM staff ORDER BY active DESC, name`).all(),
-      env.DB.prepare(`SELECT id,actor_email,action,entity_type,entity_id,metadata_json,created_at FROM audit_events ORDER BY created_at DESC LIMIT 40`).all()
-    ]);
-    return json({ data: {
-      currentUser: { id: staff.id, email: staff.email, name: staff.name, role: staff.role, active: Boolean(staff.active) },
-      staff: staffRows.results || [],
-      audit: auditRows.results || [],
-      providers: {
-        smsConfigured: Boolean(String(env.SMS_PROVIDER_URL || '').trim() && String(env.SMS_PROVIDER_TOKEN || '').trim()),
-        emailConfigured: Boolean(String(env.EMAIL_PROVIDER_URL || '').trim() && String(env.EMAIL_PROVIDER_TOKEN || '').trim()),
-        webhookConfigured: Boolean(String(env.MESSAGE_WEBHOOK_SECRET || '').trim())
-      },
-      accessBoundary: 'Cloudflare Access',
-      database: 'D1'
-    } });
   }
 
   // ---------- Dashboard summary ----------

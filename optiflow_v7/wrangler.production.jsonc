@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "web-optics-practice-management-software",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-06",
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "optiflow-production-db",
+      "database_id": "d9dbfc4d-60ae-4d25-a896-029b1c5f41a2",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
