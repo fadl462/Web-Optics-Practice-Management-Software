@@ -610,7 +610,7 @@ function reports(){
  let d=reportData();
  let today=todayLabel();
  return '<div class="reports-page">'+
- '<div class="page-head reports-head"><div><div class="eyebrow">MANAGEMENT ANALYTICS</div><h1>Reports</h1><p>See what is happening across your practice, what needs attention and where performance is moving.</p></div><div class="actions"><button class="btn" onclick="toast(\'Report export queued\')">↓ Export</button><button class="btn primary" onclick="toast(\'Report shared securely\')">Share report</button></div></div>'+
+ '<div class="page-head reports-head"><div><div class="eyebrow">MANAGEMENT ANALYTICS</div><h1>Reports</h1><p>See what is happening across your practice, what needs attention and where performance is moving.</p></div><div class="actions"><button class="btn" onclick="openExportChooser()">↓ Export</button><button class="btn primary" onclick="shareReport()">Share report</button></div></div>'+
  '<div class="report-command card report-command-premium"><div class="report-command-copy"><div class="intel-label">OPTIFLOW REPORTING ENGINE</div><div class="report-command-title"><span class="report-command-icon">◈</span><div><h2>Practice performance overview</h2><p>'+today+' · Decision-ready view for practice management</p></div></div><div class="report-command-tags"><span>● Live practice signals</span><span>↗ Operational trend</span><span>✓ Management ready</span></div></div><div class="report-command-side"><div class="report-health"><strong>92%</strong><span>Reporting health</span><i></i></div><div class="report-controls"><select aria-label="Report period" onchange="toast(\'Reporting period updated\')"><option>Last 30 days</option><option>Last 7 days</option><option>This month</option><option>This quarter</option></select><button class="btn" onclick="toast(\'Report customization opened\')">Customize</button></div></div></div>'+
  '<div class="report-grid report-kpis">'+
  '<div class="report-metric report-kpi teal"><div class="metric-head"><span>Patients</span><b>↗</b></div><strong>'+d.patients+'</strong><small class="green">Live database count</small><div class="metric-spark"><i style="height:35%"></i><i style="height:48%"></i><i style="height:44%"></i><i style="height:65%"></i><i style="height:58%"></i><i style="height:78%"></i><i style="height:88%"></i></div></div>'+
@@ -630,11 +630,27 @@ function reports(){
  '<div class="report-footer-strip"><div><span class="footer-mark">✦</span><div><strong>Reporting workspace ready</strong><p>Use reports to guide staffing, recalls, communication and operational follow-up.</p></div></div><div><button class="btn" onclick="toast(\'Scheduled report workflow opened\')">Schedule report</button><button class="btn primary" onclick="toast(\'Executive summary generated\')">Generate summary</button></div></div>'+
  '</div>';
 }
-function exportReport(){
- const rows=[['Metric','Value'],['Patients',state.patients.length],['Recall ready',state.recalls.filter(r=>r.status==='Ready').length],['Open tasks',state.tasks.filter(t=>!t.done).length],['Messages',state.messages.length]];
- const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(',')).join('\n');
- const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='optiflow-practice-report.csv';a.click();URL.revokeObjectURL(url);toast('Report exported as CSV');
+function openExportChooser(){
+ const existing=document.getElementById('exportChooser'); if(existing) return;
+ const datasets=[['patients','Patients'],['appointments','Appointments'],['recalls','Recalls'],['tasks','Tasks'],['messages','Messages']];
+ document.body.insertAdjacentHTML('beforeend','<div id="exportChooser" class="modal-backdrop" onclick="if(event.target===this)this.remove()"><div class="modal-card"><div class="modal-head"><div><div class="eyebrow">GOVERNED EXPORT</div><h3>Export practice data</h3><p>Exports are permission-controlled and recorded in the audit trail.</p></div><button class="icon-btn" onclick="document.getElementById(\'exportChooser\')?.remove()">×</button></div><div class="form-grid"><div class="field full"><label>Dataset</label><select id="exportDataset">'+datasets.map(d=>'<option value="'+d[0]+'">'+d[1]+'</option>').join('')+'</select></div><div class="field"><label>From (optional)</label><input id="exportFrom" type="date"></div><div class="field"><label>To (optional)</label><input id="exportTo" type="date"></div></div><div class="modal-actions"><button class="btn" onclick="document.getElementById(\'exportChooser\')?.remove()">Cancel</button><button class="btn primary" onclick="exportPracticeData()">Export CSV</button></div></div></div>');
 }
+async function exportPracticeData(){
+ const dataset=document.getElementById('exportDataset')?.value||'patients'; const from=document.getElementById('exportFrom')?.value||''; const to=document.getElementById('exportTo')?.value||'';
+ if(from&&to&&from>to){toast('The start date must be before the end date');return;}
+ if(state.backendConnected){
+  try{
+   const params=new URLSearchParams({dataset}); if(from)params.set('from',from); if(to)params.set('to',to);
+   const res=await fetch('/api/exports/practice.csv?'+params.toString(),{credentials:'include'}); const blob=await res.blob();
+   if(!res.ok){let msg='Export failed';try{const x=JSON.parse(await blob.text());msg=x?.error?.message||msg;}catch{}throw new Error(msg);}
+   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=res.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1]||('optiflow-'+dataset+'.csv');a.click();URL.revokeObjectURL(url);
+   document.getElementById('exportChooser')?.remove(); toast('Export completed and audit logged'); return;
+  }catch(e){toast(e.message);return;}
+ }
+ const rows=dataset==='patients'?[['Patient ID','Name','Status'],...state.patients.map(p=>[p.id,p.name,p.status])]:dataset==='tasks'?[['Task ID','Title','Owner','Priority','Done'],...state.tasks.map(t=>[t.id,t.title,t.owner,t.priority,t.done?'Yes':'No'])]:dataset==='recalls'?[['Recall ID','Patient','Due','Channel','Status'],...state.recalls.map(r=>[r.id,r.patient,r.due,r.channel,r.status])]:dataset==='appointments'?[['Appointment ID','Patient','Start','Provider','Status'],...state.appointments.map(a=>[a.id,a.patient,a.time,a.provider,a.status])]:[['Message ID','Patient','Channel','Status'],...state.messages.map(m=>[m.id,m.patient,m.channel,m.status])];
+ const csv=rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='optiflow-'+dataset+'.csv';a.click();URL.revokeObjectURL(url);document.getElementById('exportChooser')?.remove();toast('Local workspace export completed');
+}
+function exportReport(){openExportChooser();}
 function shareReport(){navigator.clipboard?.writeText(location.href+'#reports').then(()=>toast('Report link copied')).catch(()=>toast('Report link ready to share'));}
 function go(page){current=page;selectedPatient=null;if(location.hash!==`#${page}`) location.hash=page;render()}
 window.go=go;

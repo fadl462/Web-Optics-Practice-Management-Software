@@ -70,6 +70,33 @@ function allowedOrigin(request) {
   return origin === new URL(request.url).origin;
 }
 
+const RATE_BUCKETS = new Map();
+const RATE_WINDOW_MS = 60_000;
+const RATE_LIMIT = 120;
+
+function requestId() { return crypto.randomUUID(); }
+
+function clientKey(request) {
+  return String(request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || 'unknown').split(',')[0].trim();
+}
+
+function rateLimited(request) {
+  const key = clientKey(request);
+  const nowMs = Date.now();
+  const bucket = RATE_BUCKETS.get(key);
+  if (!bucket || nowMs - bucket.startedAt >= RATE_WINDOW_MS) {
+    RATE_BUCKETS.set(key, { startedAt: nowMs, count: 1 });
+    return false;
+  }
+  bucket.count += 1;
+  return bucket.count > RATE_LIMIT;
+}
+
+async function hashIp(request) {
+  const ip = clientKey(request);
+  return bytesToHex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ip)));
+}
+
 async function requireIdentity(request, env) {
   // Cloudflare Access is the production authentication boundary.
   // For Workers with Static Assets, use the Access identity header because
@@ -107,7 +134,7 @@ async function audit(env, staff, request, action, entityType, entityId, metadata
      VALUES (?,?,?,?,?,?,?,?,?)`
   ).bind(
     id('AUD'), staff.id, staff.email, action, entityType, entityId || null,
-    JSON.stringify(metadata), null, now()
+    JSON.stringify(metadata), await hashIp(request), now()
   ).run();
 }
 
@@ -292,7 +319,12 @@ function methodIsPost(request) { return request.method.toUpperCase() === 'POST';
 
 async function api(request, env, ctx) {
   const url = new URL(request.url);
-  if (url.pathname === '/api/webhooks/messages' && methodIsPost(request)) return messageWebhook(request, env);
+  const rid = requestId();
+  if (rateLimited(request)) return error('Too many requests. Please try again shortly.', 429, 'RATE_LIMITED');
+  if (url.pathname === '/api/webhooks/messages' && methodIsPost(request)) {
+    if (rateLimited(request)) return error('Too many requests. Please try again shortly.', 429, 'RATE_LIMITED');
+    return messageWebhook(request, env);
+  }
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   if (!allowedOrigin(request)) return error('Cross-origin request blocked.', 403, 'ORIGIN_BLOCKED');
 
@@ -856,6 +888,74 @@ async function api(request, env, ctx) {
       env.DB.prepare(`SELECT COUNT(*) AS count FROM appointments WHERE start_at >= datetime('now','-30 day')`).first(),
     ]);
     return json({ data: { patients: patients.count, recallReady: recalls.count, openTasks: tasks.count, messages30d: messages.count, appointments30d: appointments.count } });
+  }
+
+  // ---------- Governed exports ----------
+  if (path === 'exports/practice.csv' && method === 'GET') {
+    const denied = requirePermission(staff, 'export'); if (denied) return denied;
+    const dataset = (url.searchParams.get('dataset') || 'patients').trim().toLowerCase();
+    const from = (url.searchParams.get('from') || '').trim();
+    const to = (url.searchParams.get('to') || '').trim();
+    const allowed = new Set(['patients','appointments','recalls','tasks','messages']);
+    if (!allowed.has(dataset)) return error('Unsupported export dataset.', 400, 'INVALID_EXPORT');
+    const dateFrom = from ? `${from} 00:00:00` : null;
+    const dateTo = to ? `${to} 23:59:59` : null;
+    let headers = [], rows = [];
+    const csvCell = value => {
+      let v = value == null ? '' : String(value);
+      if (/^[=+\-@]/.test(v)) v = "'" + v; // prevent spreadsheet formula injection
+      return '"' + v.replace(/"/g, '""') + '"';
+    };
+    const csv = () => [headers, ...rows].map(row => row.map(csvCell).join(',')).join('\r\n');
+    if (dataset === 'patients') {
+      headers=['Patient ID','First name','Last name','Date of birth','Phone','Email','Status','Created','Updated'];
+      const result=await env.DB.prepare(`SELECT id,first_name,last_name,date_of_birth,phone,email,status,created_at,updated_at FROM patients ORDER BY last_name,first_name`).all();
+      rows=(result.results||[]).map(r=>[r.id,r.first_name,r.last_name,r.date_of_birth,r.phone,r.email,r.status,r.created_at,r.updated_at]);
+    } else if (dataset === 'appointments') {
+      headers=['Appointment ID','Patient ID','Start','End','Visit type','Provider','Status','Created'];
+      const result=await env.DB.prepare(`SELECT id,patient_id,start_at,end_at,visit_type,provider,status,created_at FROM appointments WHERE (? IS NULL OR start_at >= ?) AND (? IS NULL OR start_at <= ?) ORDER BY start_at`).bind(dateFrom,dateFrom,dateTo,dateTo).all();
+      rows=(result.results||[]).map(r=>[r.id,r.patient_id,r.start_at,r.end_at,r.visit_type,r.provider,r.status,r.created_at]);
+    } else if (dataset === 'recalls') {
+      headers=['Recall ID','Patient ID','Type','Due date','Channel','Status','Source','Created','Updated'];
+      const result=await env.DB.prepare(`SELECT id,patient_id,type,due_date,channel,status,source,created_at,updated_at FROM recalls WHERE (? IS NULL OR COALESCE(due_date,created_at) >= ?) AND (? IS NULL OR COALESCE(due_date,created_at) <= ?) ORDER BY COALESCE(due_date,created_at)`).bind(dateFrom,dateFrom,dateTo,dateTo).all();
+      rows=(result.results||[]).map(r=>[r.id,r.patient_id,r.type,r.due_date,r.channel,r.status,r.source,r.created_at,r.updated_at]);
+    } else if (dataset === 'tasks') {
+      headers=['Task ID','Patient ID','Title','Owner','Due date','Priority','Done','Created','Updated'];
+      const result=await env.DB.prepare(`SELECT id,patient_id,title,owner,due_date,priority,done,created_at,updated_at FROM tasks WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at <= ?) ORDER BY created_at DESC`).bind(dateFrom,dateFrom,dateTo,dateTo).all();
+      rows=(result.results||[]).map(r=>[r.id,r.patient_id,r.title,r.owner,r.due_date,r.priority,r.done?'Yes':'No',r.created_at,r.updated_at]);
+    } else if (dataset === 'messages') {
+      headers=['Message ID','Patient ID','Channel','Direction','Status','Created','Updated'];
+      const result=await env.DB.prepare(`SELECT id,patient_id,channel,direction,status,created_at,updated_at FROM messages WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at <= ?) ORDER BY created_at DESC`).bind(dateFrom,dateFrom,dateTo,dateTo).all();
+      rows=(result.results||[]).map(r=>[r.id,r.patient_id,r.channel,r.direction,r.status,r.created_at,r.updated_at]);
+    }
+    await audit(env, staff, request, 'data.exported', 'export', dataset, { dataset, from: from || null, to: to || null, rowCount: rows.length });
+    return new Response(csv(), { status:200, headers:{...SECURITY_HEADERS,'content-type':'text/csv; charset=UTF-8','content-disposition':`attachment; filename="optiflow-${dataset}-${new Date().toISOString().slice(0,10)}.csv"`,'cache-control':'no-store'} });
+  }
+
+  // ---------- Security posture ----------
+  if (path === 'security/posture' && method === 'GET') {
+    const denied = requirePermission(staff, 'admin'); if (denied) return denied;
+    const [staffCount, activeStaff, patientCount, auditCount] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM staff`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM staff WHERE active=1`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM patients`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM audit_events`).first()
+    ]);
+    return json({ data: {
+      accessBoundary: 'Cloudflare Access',
+      authorization: 'Server-side RBAC',
+      database: 'Cloudflare D1',
+      auditTrail: 'Enabled',
+      staff: { total: Number(staffCount?.count || 0), active: Number(activeStaff?.count || 0) },
+      patients: Number(patientCount?.count || 0),
+      auditEvents: Number(auditCount?.count || 0),
+      providers: {
+        sms: Boolean(String(env.SMS_PROVIDER_URL || '').trim() && String(env.SMS_PROVIDER_TOKEN || '').trim()),
+        email: Boolean(String(env.EMAIL_PROVIDER_URL || '').trim() && String(env.EMAIL_PROVIDER_TOKEN || '').trim()),
+        webhook: Boolean(String(env.MESSAGE_WEBHOOK_SECRET || '').trim())
+      },
+      generatedAt: now()
+    } });
   }
 
   // ---------- Audit ----------
