@@ -97,6 +97,27 @@ function patientSelect() {
           FROM patients`;
 }
 
+async function runRecallAutomation(env) {
+  if (!env.DB) return { queued: 0, reason: 'DB_NOT_CONFIGURED' };
+  const timestamp = now();
+  const candidates = await env.DB.prepare(
+    `SELECT r.id, r.patient_id, r.due_date, r.status
+     FROM recalls r
+     WHERE r.status='Scheduled'
+       AND date(r.due_date) <= date('now','+30 day')
+     ORDER BY r.due_date ASC LIMIT 500`
+  ).all();
+  let queued = 0;
+  for (const row of candidates.results || []) {
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE recalls SET status='Ready', updated_at=? WHERE id=? AND status='Scheduled'`).bind(timestamp, row.id),
+      env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,created_at) VALUES (?,?,?,?,?)`).bind(id('RCLE'), row.id, 'automation_eligible', 'Ready', timestamp)
+    ]);
+    queued += 1;
+  }
+  return { queued, checked: (candidates.results || []).length };
+}
+
 async function api(request, env, ctx) {
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   if (!allowedOrigin(request)) return error('Cross-origin request blocked.', 403, 'ORIGIN_BLOCKED');
@@ -111,6 +132,12 @@ async function api(request, env, ctx) {
     const accessEmail = String(request.headers.get('Cf-Access-Authenticated-User-Email') || '').trim().toLowerCase();
     if (!accessEmail) return error('Authentication required.', 401, 'AUTH_REQUIRED');
     if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
+    let schemaReady = true;
+    try {
+      await env.DB.prepare(`SELECT 1 FROM staff LIMIT 1`).first();
+      await env.DB.prepare(`SELECT 1 FROM patients LIMIT 1`).first();
+    } catch { schemaReady = false; }
+    if (!schemaReady) return json({ ok: false, service: 'optiflow-api', accessAuthenticated: true, authorized: false, schemaReady: false, bootstrapConfigured: Boolean(String(env.BOOTSTRAP_ADMIN_EMAIL || '').trim()), bootstrapMatches: false, role: null, message: 'D1 is connected but the OptiFlow database schema is not ready.' }, 503, { 'cache-control': 'no-store' });
     const staff = await env.DB.prepare(
       `SELECT id,email,name,role,active FROM staff WHERE lower(email)=? LIMIT 1`
     ).bind(accessEmail).first();
@@ -154,9 +181,19 @@ async function api(request, env, ctx) {
     if (!first || !last) return error('First name and last name are required.');
     const patientId = id('PAT');
     const timestamp = now();
-    await env.DB.prepare(`INSERT INTO patients (id,first_name,last_name,date_of_birth,phone,email,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`)
-      .bind(patientId, first, last, input.dateOfBirth || null, input.phone || null, input.email || null, 'Active', timestamp, timestamp).run();
-    await audit(env, staff, request, 'patient.created', 'patient', patientId, { fields: ['first_name','last_name','date_of_birth','phone','email'] });
+    await env.DB.prepare(`INSERT INTO patients (id,first_name,last_name,date_of_birth,phone,email,status,notes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .bind(patientId, first, last, input.dateOfBirth || null, input.phone || null, input.email || null, 'Active', input.notes || null, timestamp, timestamp).run();
+
+    if (String(input.insuranceProvider || '').trim()) {
+      await env.DB.prepare(`INSERT INTO insurance_policies (id,patient_id,provider,policy_number,member_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .bind(id('INS'), patientId, String(input.insuranceProvider).trim(), input.policyNumber || null, input.memberId || null, input.insuranceStatus || 'Pending', timestamp, timestamp).run();
+    }
+    if (input.nextRecall) {
+      const recallId = id('RCL');
+      await env.DB.prepare(`INSERT INTO recalls (id,patient_id,type,due_date,channel,status,source,created_at,updated_at) VALUES (?,?,?,?,?,'Scheduled','Patient intake',?,?)`)
+        .bind(recallId, patientId, input.recallType || 'Annual exam', input.nextRecall, input.recallChannel || 'SMS + Email', timestamp, timestamp).run();
+    }
+    await audit(env, staff, request, 'patient.created', 'patient', patientId, { fields: ['first_name','last_name','date_of_birth','phone','email','notes','insurance','next_recall'] });
     return json({ data: { id: patientId } }, 201);
   }
 
@@ -456,6 +493,9 @@ async function api(request, env, ctx) {
 }
 
 export default {
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(runRecallAutomation(env));
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) return api(request, env, ctx);
