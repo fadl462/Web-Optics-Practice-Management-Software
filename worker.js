@@ -572,6 +572,60 @@ async function api(request, env, ctx) {
     return json({ data: { id: recallId } }, 201);
   }
 
+  // ---------- Recall campaign controls ----------
+  if (path === 'recall-campaigns/summary' && method === 'GET') {
+    const denied = requirePermission(staff, 'view'); if (denied) return denied;
+    const [scheduled, ready, queued, sent, delivered, failed] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM recalls WHERE status='Scheduled'`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM recalls WHERE status='Ready'`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM recalls WHERE status='Queued'`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM messages WHERE direction='outbound' AND status='Sent'`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM messages WHERE direction='outbound' AND status IN ('Delivered','Read')`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM messages WHERE direction='outbound' AND status='Failed'`).first()
+    ]);
+    return json({ data: { scheduled: Number(scheduled?.count || 0), ready: Number(ready?.count || 0), queued: Number(queued?.count || 0), sent: Number(sent?.count || 0), delivered: Number(delivered?.count || 0), failed: Number(failed?.count || 0), providerReady: Boolean((String(env.SMS_PROVIDER_URL || '').trim() && String(env.SMS_PROVIDER_TOKEN || '').trim()) || (String(env.EMAIL_PROVIDER_URL || '').trim() && String(env.EMAIL_PROVIDER_TOKEN || '').trim())) } });
+  }
+
+  if (path === 'recall-campaigns/queue' && method === 'POST') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    let input; try { input = await body(request); } catch (e) { return error(e.message); }
+    const ids = Array.isArray(input.ids) ? input.ids.map(x => String(x)).filter(Boolean).slice(0, 250) : [];
+    let rows;
+    if (ids.length) {
+      const placeholders = ids.map(() => '?').join(',');
+      rows = await env.DB.prepare(`SELECT id FROM recalls WHERE status='Ready' AND id IN (${placeholders})`).bind(...ids).all();
+    } else rows = await env.DB.prepare(`SELECT id FROM recalls WHERE status='Ready' ORDER BY due_date ASC LIMIT 250`).all();
+    const timestamp = now(); let queuedCount = 0;
+    for (const row of rows.results || []) {
+      const result = await env.DB.prepare(`UPDATE recalls SET status='Queued', updated_at=? WHERE id=? AND status='Ready'`).bind(timestamp, row.id).run();
+      if (result.meta?.changes) {
+        await env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,created_at) VALUES (?,?,?,?,?)`).bind(id('RCLE'), row.id, 'campaign_queued', 'Queued', timestamp).run();
+        queuedCount += 1;
+      }
+    }
+    await audit(env, staff, request, 'recall.campaign_queued', 'recall_campaign', null, { count: queuedCount, requestedIds: ids.length ? ids : 'all_ready' });
+    return json({ data: { queued: queuedCount } }, 202);
+  }
+
+  const retryMessage = path.match(/^messages\/([^/]+)\/retry$/);
+  if (retryMessage && method === 'POST') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const messageId = decodeURIComponent(retryMessage[1]);
+    const message = await env.DB.prepare(`SELECT m.*, cp.sms_opt_in, cp.email_opt_in FROM messages m LEFT JOIN communication_preferences cp ON cp.patient_id=m.patient_id WHERE m.id=?`).bind(messageId).first();
+    if (!message) return error('Message not found.', 404, 'NOT_FOUND');
+    if (message.status !== 'Failed') return error('Only failed messages can be retried.', 409, 'INVALID_MESSAGE_STATE');
+    const optedOut = message.channel === 'Email' ? message.email_opt_in === 0 : message.sms_opt_in === 0;
+    if (optedOut) return error(`Patient has opted out of ${message.channel} communication.`, 409, 'COMMUNICATION_OPT_OUT');
+    const latest = await env.DB.prepare(`SELECT MAX(attempt_no) AS attempt_no FROM message_attempts WHERE message_id=?`).bind(messageId).first();
+    const attemptNo = Number(latest?.attempt_no || 0) + 1; const timestamp = now();
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE messages SET status='Queued', updated_at=? WHERE id=?`).bind(timestamp, messageId),
+      env.DB.prepare(`INSERT INTO message_attempts (id,message_id,attempt_no,state,created_at,updated_at) VALUES (?,?,?,?,?,?)`).bind(id('MAT'), messageId, attemptNo, 'Queued', timestamp, timestamp)
+    ]);
+    await audit(env, staff, request, 'message.retry_queued', 'message', messageId, { attemptNo });
+    return json({ data: { id: messageId, status: 'Queued', attemptNo } }, 202);
+  }
+
   // Sending is deliberately a queue operation. Provider credentials are never accepted from the browser.
   const recallSend = path.match(/^recalls\/([^/]+)\/send$/);
   if (recallSend && method === 'POST') {
