@@ -98,8 +98,13 @@ function patientSelect() {
 }
 
 async function runRecallAutomation(env) {
-  if (!env.DB) return { queued: 0, reason: 'DB_NOT_CONFIGURED' };
+  if (!env.DB) return { recallsQueued: 0, messagesQueued: 0, delivered: 0, reason: 'DB_NOT_CONFIGURED' };
   const timestamp = now();
+  let recallsQueued = 0;
+  let messagesQueued = 0;
+  let delivered = 0;
+
+  // 1) Promote due recalls into the staff-ready queue.
   const candidates = await env.DB.prepare(
     `SELECT r.id, r.patient_id, r.due_date, r.status
      FROM recalls r
@@ -107,24 +112,121 @@ async function runRecallAutomation(env) {
        AND date(r.due_date) <= date('now','+30 day')
      ORDER BY r.due_date ASC LIMIT 500`
   ).all();
-  let queued = 0;
   for (const row of candidates.results || []) {
-    await env.DB.batch([
-      env.DB.prepare(`UPDATE recalls SET status='Ready', updated_at=? WHERE id=? AND status='Scheduled'`).bind(timestamp, row.id),
-      env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,created_at) VALUES (?,?,?,?,?)`).bind(id('RCLE'), row.id, 'automation_eligible', 'Ready', timestamp)
-    ]);
-    queued += 1;
+    const result = await env.DB.prepare(`UPDATE recalls SET status='Ready', updated_at=? WHERE id=? AND status='Scheduled'`)
+      .bind(timestamp, row.id).run();
+    if (result.meta?.changes) {
+      await env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,created_at) VALUES (?,?,?,?,?)`)
+        .bind(id('RCLE'), row.id, 'automation_eligible', 'Ready', timestamp).run();
+      recallsQueued += 1;
+    }
   }
-  return { queued, checked: (candidates.results || []).length };
+
+  // 2) Queue outbound messages only for recalls explicitly approved/queued by staff.
+  const queuedRecalls = await env.DB.prepare(
+    `SELECT r.*, p.first_name, p.last_name, p.phone, p.email
+     FROM recalls r JOIN patients p ON p.id=r.patient_id
+     WHERE r.status='Queued' LIMIT 250`
+  ).all();
+  for (const recall of queuedRecalls.results || []) {
+    const existing = await env.DB.prepare(`SELECT COUNT(*) AS count FROM recall_events WHERE recall_id=? AND event_type='message_created'`).bind(recall.id).first();
+    if (Number(existing?.count || 0) > 0) continue;
+
+    const channels = String(recall.channel || 'SMS').split('+').map(x => x.trim()).filter(Boolean);
+    for (const channelName of channels) {
+      const channel = channelName.toLowerCase().startsWith('email') ? 'Email' : 'SMS';
+      const destination = channel === 'Email' ? recall.email : recall.phone;
+      if (!destination) continue;
+      const messageId = id('MSG');
+      const text = `Your ${recall.type || 'eye examination'} is due. Please reply to this message or contact our practice to schedule an appointment.`;
+      await env.DB.prepare(`INSERT INTO messages (id,patient_id,channel,direction,body,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,NULL,?,?)`)
+        .bind(messageId, recall.patient_id, channel, 'outbound', text, 'Queued', timestamp, timestamp).run();
+      await env.DB.prepare(`INSERT INTO message_attempts (id,message_id,attempt_no,state,created_at,updated_at) VALUES (?,?,?,?,?,?)`)
+        .bind(id('MAT'), messageId, 1, 'Queued', timestamp, timestamp).run();
+      await env.DB.prepare(`INSERT INTO recall_events (id,recall_id,event_type,status,created_at) VALUES (?,?,?,?,?)`)
+        .bind(id('RCLE'), recall.id, 'message_created', 'Queued', timestamp).run();
+      messagesQueued += 1;
+    }
+    await env.DB.prepare(`UPDATE recalls SET status='Queued', updated_at=? WHERE id=? AND status='Queued'`).bind(timestamp, recall.id).run();
+  }
+
+  // 3) Try provider delivery when server-side provider credentials are configured.
+  const outbound = await env.DB.prepare(
+    `SELECT m.*, p.phone, p.email FROM messages m JOIN patients p ON p.id=m.patient_id
+     WHERE m.direction='outbound' AND m.status='Queued' ORDER BY m.created_at ASC LIMIT 100`
+  ).all();
+  for (const message of outbound.results || []) {
+    const channel = message.channel;
+    const endpoint = channel === 'SMS' ? env.SMS_PROVIDER_URL : env.EMAIL_PROVIDER_URL;
+    const token = channel === 'SMS' ? env.SMS_PROVIDER_TOKEN : env.EMAIL_PROVIDER_TOKEN;
+    if (!endpoint || !token) {
+      await env.DB.prepare(`UPDATE message_attempts SET state='ProviderNotConfigured', error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`)
+        .bind(`${channel} provider is not configured.`, timestamp, message.id, message.id).run();
+      continue;
+    }
+
+    const destination = channel === 'SMS' ? message.phone : message.email;
+    if (!destination) {
+      await env.DB.prepare(`UPDATE messages SET status='Failed', updated_at=? WHERE id=?`).bind(timestamp, message.id).run();
+      await env.DB.prepare(`UPDATE message_attempts SET state='Failed', error_code='NO_DESTINATION', error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`)
+        .bind(`No ${channel} destination is available.`, timestamp, message.id, message.id).run();
+      continue;
+    }
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
+        body: JSON.stringify({ to: destination, body: message.body, channel, messageId: message.id })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.message || `Provider returned HTTP ${response.status}`);
+      const providerId = payload?.id || payload?.messageId || payload?.sid || null;
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE messages SET status='Sent', provider_message_id=?, updated_at=? WHERE id=?`).bind(providerId, timestamp, message.id),
+        env.DB.prepare(`UPDATE message_attempts SET state='Sent', provider_message_id=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(providerId, timestamp, message.id, message.id)
+      ]);
+      delivered += 1;
+    } catch (e) {
+      await env.DB.batch([
+        env.DB.prepare(`UPDATE messages SET status='Failed', updated_at=? WHERE id=?`).bind(timestamp, message.id),
+        env.DB.prepare(`UPDATE message_attempts SET state='Failed', error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(String(e?.message || e), timestamp, message.id, message.id)
+      ]);
+    }
+  }
+  return { recallsQueued, messagesQueued, delivered };
 }
 
+async function messageWebhook(request, env) {
+  if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
+  const secret = String(env.MESSAGE_WEBHOOK_SECRET || '').trim();
+  if (!secret) return error('Message webhook is not configured.', 503, 'WEBHOOK_NOT_CONFIGURED');
+  const provided = String(request.headers.get('X-OptiFlow-Webhook-Secret') || '').trim();
+  if (!provided || provided !== secret) return error('Webhook authentication failed.', 401, 'WEBHOOK_UNAUTHORIZED');
+  let input; try { input = await body(request); } catch (e) { return error(e.message); }
+  const messageId = String(input.messageId || '').trim();
+  const status = String(input.status || '').trim();
+  if (!messageId || !['Sent','Delivered','Failed','Read'].includes(status)) return error('messageId and a valid delivery status are required.');
+  const message = await env.DB.prepare(`SELECT id FROM messages WHERE id=?`).bind(messageId).first();
+  if (!message) return error('Message not found.', 404, 'NOT_FOUND');
+  const timestamp = now();
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE messages SET status=?, provider_message_id=COALESCE(?,provider_message_id), updated_at=? WHERE id=?`).bind(status, input.providerMessageId || null, timestamp, messageId),
+    env.DB.prepare(`UPDATE message_attempts SET state=?, provider_message_id=COALESCE(?,provider_message_id), error_code=?, error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(status, input.providerMessageId || null, input.errorCode || null, input.errorMessage || null, timestamp, messageId, messageId)
+  ]);
+  return json({ ok: true, data: { messageId, status } });
+}
+
+function methodIsPost(request) { return request.method.toUpperCase() === 'POST'; }
+
 async function api(request, env, ctx) {
+  const url = new URL(request.url);
+  if (url.pathname === '/api/webhooks/messages' && methodIsPost(request)) return messageWebhook(request, env);
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   if (!allowedOrigin(request)) return error('Cross-origin request blocked.', 403, 'ORIGIN_BLOCKED');
 
-  const url = new URL(request.url);
-  const path = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
   const method = request.method.toUpperCase();
+  const path = url.pathname.replace(/^\/api\/?/, '').replace(/\/$/, '');
 
   // Health is Access-authenticated but does not require an OptiFlow staff record.
   // This makes first-time setup diagnosable without exposing the configured admin email.
@@ -203,15 +305,16 @@ async function api(request, env, ctx) {
     const patientId = decodeURIComponent(patientMatch[1]);
     const patient = await env.DB.prepare(`SELECT * FROM patients WHERE id=?`).bind(patientId).first();
     if (!patient) return error('Patient not found.', 404, 'NOT_FOUND');
-    const [insurance, prescriptions, history, allergies, medications] = await Promise.all([
+    const [insurance, prescriptions, history, allergies, medications, communicationPreferences] = await Promise.all([
       env.DB.prepare(`SELECT * FROM insurance_policies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM prescriptions WHERE patient_id=? ORDER BY prescribed_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM medical_history WHERE patient_id=? ORDER BY event_date DESC, created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM allergies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM medications WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
+      env.DB.prepare(`SELECT * FROM communication_preferences WHERE patient_id=?`).bind(patientId).first(),
     ]);
     await audit(env, staff, request, 'patient.viewed', 'patient', patientId);
-    return json({ data: { patient, insurance: insurance.results, prescriptions: prescriptions.results, history: history.results, allergies: allergies.results, medications: medications.results } });
+    return json({ data: { patient, insurance: insurance.results, prescriptions: prescriptions.results, history: history.results, allergies: allergies.results, medications: medications.results, communicationPreferences: communicationPreferences || null } });
   }
 
   if (patientMatch && method === 'PATCH') {
@@ -432,6 +535,28 @@ async function api(request, env, ctx) {
     return json({ data: { id: recallId, status: 'Queued' } }, 202);
   }
 
+  // ---------- Communication preferences ----------
+  const prefMatch = path.match(/^patients\/([^/]+)\/communication-preferences$/);
+  if (prefMatch && method === 'GET') {
+    const denied = requirePermission(staff, 'view'); if (denied) return denied;
+    const patientId = decodeURIComponent(prefMatch[1]);
+    const result = await env.DB.prepare(`SELECT patient_id,sms_opt_in,email_opt_in,consent_source,updated_at FROM communication_preferences WHERE patient_id=?`).bind(patientId).first();
+    return json({ data: result || { patient_id: patientId, sms_opt_in: null, email_opt_in: null, consent_source: null, updated_at: null } });
+  }
+  if (prefMatch && method === 'PATCH') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const patientId = decodeURIComponent(prefMatch[1]);
+    let input; try { input = await body(request); } catch (e) { return error(e.message); }
+    const sms = input.smsOptIn === null || input.smsOptIn === undefined ? null : (input.smsOptIn ? 1 : 0);
+    const email = input.emailOptIn === null || input.emailOptIn === undefined ? null : (input.emailOptIn ? 1 : 0);
+    const source = String(input.consentSource || 'Staff updated').slice(0,120);
+    const timestamp = now();
+    await env.DB.prepare(`INSERT INTO communication_preferences (patient_id,sms_opt_in,email_opt_in,consent_source,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(patient_id) DO UPDATE SET sms_opt_in=excluded.sms_opt_in,email_opt_in=excluded.email_opt_in,consent_source=excluded.consent_source,updated_at=excluded.updated_at`)
+      .bind(patientId,sms,email,source,timestamp).run();
+    await audit(env,staff,request,'patient.communication_preferences.updated','patient',patientId,{smsOptIn:sms,emailOptIn:email});
+    return json({ data: { patientId, smsOptIn: sms, emailOptIn: email, consentSource: source } });
+  }
+
   // ---------- Messages ----------
   if (path === 'conversations' && method === 'GET') {
     const denied = requirePermission(staff, 'view'); if (denied) return denied;
@@ -444,10 +569,16 @@ async function api(request, env, ctx) {
     let input; try { input = await body(request); } catch (e) { return error(e.message); }
     const text = String(input.text || '').trim();
     if (!input.patientId || !text) return error('Patient and message text are required.');
+    const pref = await env.DB.prepare(`SELECT sms_opt_in,email_opt_in FROM communication_preferences WHERE patient_id=?`).bind(input.patientId).first();
+    const requestedChannel = input.channel || 'SMS';
+    if (pref && ((requestedChannel === 'SMS' && pref.sms_opt_in === 0) || (requestedChannel === 'Email' && pref.email_opt_in === 0))) {
+      return error(`Patient has opted out of ${requestedChannel} communication.`, 409, 'COMMUNICATION_OPT_OUT');
+    }
     const messageId = id('MSG'); const timestamp = now();
     await env.DB.prepare(`INSERT INTO messages (id,patient_id,channel,direction,body,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?)`)
-      .bind(messageId, input.patientId, input.channel || 'SMS', 'outbound', text, 'Queued', staff.id, timestamp, timestamp).run();
-    await audit(env, staff, request, 'message.queued', 'message', messageId, { channel: input.channel || 'SMS' });
+      .bind(messageId, input.patientId, requestedChannel, 'outbound', text, 'Queued', staff.id, timestamp, timestamp).run();
+    await env.DB.prepare(`INSERT INTO message_attempts (id,message_id,attempt_no,state,created_at,updated_at) VALUES (?,?,?,?,?,?)`).bind(id('MAT'),messageId,1,'Queued',timestamp,timestamp).run();
+    await audit(env, staff, request, 'message.queued', 'message', messageId, { channel: requestedChannel });
     return json({ data: { id: messageId, status: 'Queued' } }, 202);
   }
 

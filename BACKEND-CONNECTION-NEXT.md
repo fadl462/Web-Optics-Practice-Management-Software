@@ -102,3 +102,34 @@ Do not disable Cloudflare Access to work around this.
 ## Messaging / automation boundary
 
 OptiFlow now stores outbound SMS/email messages as `Queued` records and stores recall send requests as queue events. A real SMS/email provider and delivery webhook are still required before the application can truthfully report that a message was delivered.
+
+## Critical Build v6 — Messaging & Delivery Queue
+
+v6 adds the server-side communication delivery foundation:
+
+- `communication_preferences` stores explicit SMS/email opt-in or opt-out status.
+- Manual outbound messages are rejected when the patient has explicitly opted out of that channel.
+- `message_attempts` records provider attempts and errors without storing provider credentials in the browser.
+- The scheduled Worker promotes eligible recalls, creates queued outbound messages for staff-queued recalls, and attempts provider delivery only when server-side provider secrets are configured.
+- Delivery webhooks are accepted at `/api/webhooks/messages` using the `MESSAGE_WEBHOOK_SECRET` Worker secret and update message/attempt status.
+- The application does not claim delivery when no provider is configured; messages remain queued and the UI identifies them as waiting for provider delivery.
+
+### Provider environment variables
+
+Configure these as Worker secrets/variables only after selecting a real provider and adapting its request contract:
+
+- `SMS_PROVIDER_URL`
+- `SMS_PROVIDER_TOKEN` (secret)
+- `EMAIL_PROVIDER_URL`
+- `EMAIL_PROVIDER_TOKEN` (secret)
+- `MESSAGE_WEBHOOK_SECRET` (secret)
+
+The generic provider adapter sends `{ to, body, channel, messageId }` with `Authorization: Bearer <token>`. The provider's webhook should POST to `/api/webhooks/messages` with the `X-OptiFlow-Webhook-Secret` header and a JSON body containing `messageId`, `status`, and optionally `providerMessageId`, `errorCode`, and `errorMessage`.
+
+**Do not configure a provider until the provider-specific payload, authentication method, consent requirements, sender identity, rate limits, and webhook signing method have been verified.** The generic adapter is a controlled integration boundary, not a claim that a particular provider is already integrated.
+
+### Migration
+
+Apply `migrations/0003_messaging_delivery.sql` after the first two migrations.
+
+Never run the demo seed against a live production database containing real patient data.
