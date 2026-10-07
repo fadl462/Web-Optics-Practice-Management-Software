@@ -188,3 +188,6 @@ body{min-height:100dvh;overflow-x:hidden;}
 .record-list-row{gap:14px}
 .record-list-row>div:first-child{min-width:0;flex:1}
 textarea{min-height:110px;resize:vertical}
+
+/* v16 security posture */
+.security-posture-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:16px 0}.security-posture-grid>div{padding:14px 15px;border:1px solid var(--line,#e6edf1);border-radius:14px;background:#fff}.security-posture-grid span{display:block;font-size:11px;color:#7b8b9a;margin-bottom:5px}.security-posture-grid strong{display:block;font-size:13px;color:#10243a}.security-posture-grid strong::before{content:'● ';color:#14b8a6;font-size:9px}.security-posture-grid strong:empty::before{content:''}@media(max-width:900px){.security-posture-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){.security-posture-grid{grid-template-columns:1fr}}
