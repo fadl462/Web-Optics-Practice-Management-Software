@@ -77,3 +77,28 @@ This stage does not yet provide real SMS/email delivery. Recall sending and mess
 
 ### D1 schema migration
 The package now includes `0001_initial.sql` under the package root. Keep it with the deployment files. Your `wrangler*.jsonc` points to `migrations`; if your repository already has the same migration, do not create a duplicate migration. Apply the migration to the intended D1 database before testing the API if the schema has not already been created.
+
+
+## Current authorization message
+
+If the top bar says **“Your account is not authorized for OptiFlow”**, Cloudflare Access authentication has reached the Worker, but the authenticated email is not yet present in the `staff` table and does not match `BOOTSTRAP_ADMIN_EMAIL`.
+
+Do not put the email in GitHub or in `wrangler.jsonc`. In Cloudflare Workers & Pages, open the Worker → Settings → Variables and Secrets → Add secret, create `BOOTSTRAP_ADMIN_EMAIL`, and enter the exact email address used to sign in through Cloudflare Access. Then redeploy/retry the Worker. The first successful authenticated request from that exact account creates the Practice Manager record.
+
+Do not disable Cloudflare Access to work around this.
+
+## Critical build wave included in this package
+
+- Smaller, denser sidebar typography while retaining the classic visual hierarchy.
+- Clinical record write APIs for medical history, allergies, medications, prescriptions and insurance.
+- Recall, appointment and message status update APIs.
+- Practice settings persistence through D1 with admin authorization.
+- Staff administration endpoints with role validation and audit logging.
+- Dashboard summary API foundation.
+- Dashboard counts no longer invent message/recall totals when connected to the database.
+- Quick messaging and practice settings now use the backend when connected.
+- Clinical patient-record actions now open real data-entry workflows instead of placeholder editor toasts.
+
+## Messaging / automation boundary
+
+OptiFlow now stores outbound SMS/email messages as `Queued` records and stores recall send requests as queue events. A real SMS/email provider and delivery webhook are still required before the application can truthfully report that a message was delivered.

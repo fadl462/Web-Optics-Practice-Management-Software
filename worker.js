@@ -175,6 +175,142 @@ async function api(request, env, ctx) {
     return json({ data: { id: patientId } });
   }
 
+  // ---------- Clinical record writes ----------
+  const clinicalMatch = path.match(/^patients\/([^/]+)\/(history|allergies|medications|prescriptions|insurance)$/);
+  if (clinicalMatch && method === 'POST') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const patientId = decodeURIComponent(clinicalMatch[1]);
+    const section = clinicalMatch[2];
+    const exists = await env.DB.prepare(`SELECT id FROM patients WHERE id=?`).bind(patientId).first();
+    if (!exists) return error('Patient not found.', 404, 'NOT_FOUND');
+    let input; try { input = await body(request); } catch (e) { return error(e.message); }
+    const timestamp = now();
+    let recordId;
+    if (section === 'history') {
+      if (!String(input.category||'').trim() || !String(input.description||'').trim()) return error('History category and description are required.');
+      recordId=id('HIS');
+      await env.DB.prepare(`INSERT INTO medical_history (id,patient_id,event_date,category,description,created_by,created_at) VALUES (?,?,?,?,?,?,?)`)
+        .bind(recordId,patientId,input.eventDate||timestamp.slice(0,10),String(input.category).trim(),String(input.description).trim(),staff.id,timestamp).run();
+    } else if (section === 'allergies') {
+      if (!String(input.allergen||'').trim()) return error('Allergen is required.');
+      recordId=id('ALG');
+      await env.DB.prepare(`INSERT INTO allergies (id,patient_id,allergen,reaction,severity,created_at) VALUES (?,?,?,?,?,?)`)
+        .bind(recordId,patientId,String(input.allergen).trim(),input.reaction||null,input.severity||null,timestamp).run();
+    } else if (section === 'medications') {
+      if (!String(input.name||'').trim()) return error('Medication name is required.');
+      recordId=id('MED');
+      await env.DB.prepare(`INSERT INTO medications (id,patient_id,name,dose,frequency,active,created_at) VALUES (?,?,?,?,?,1,?)`)
+        .bind(recordId,patientId,String(input.name).trim(),input.dose||null,input.frequency||null,timestamp).run();
+    } else if (section === 'prescriptions') {
+      if (!input.prescribedAt) return error('Prescription date is required.');
+      recordId=id('RX');
+      await env.DB.prepare(`INSERT INTO prescriptions (id,patient_id,prescribed_at,od_sphere,od_cylinder,od_axis,od_add,os_sphere,os_cylinder,os_axis,os_add,notes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(recordId,patientId,input.prescribedAt,input.odSphere||null,input.odCylinder||null,input.odAxis||null,input.odAdd||null,input.osSphere||null,input.osCylinder||null,input.osAxis||null,input.osAdd||null,input.notes||null,staff.id,timestamp).run();
+    } else if (section === 'insurance') {
+      if (!String(input.provider||'').trim()) return error('Insurance provider is required.');
+      recordId=id('INS');
+      await env.DB.prepare(`INSERT INTO insurance_policies (id,patient_id,provider,policy_number,member_id,status,effective_from,effective_to,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .bind(recordId,patientId,String(input.provider).trim(),input.policyNumber||null,input.memberId||null,input.status||'Pending',input.effectiveFrom||null,input.effectiveTo||null,timestamp,timestamp).run();
+    }
+    await audit(env, staff, request, `patient.${section}.created`, section, recordId, { patientId });
+    return json({ data: { id: recordId, patientId, section } }, 201);
+  }
+
+  // ---------- Recall / appointment / message status updates ----------
+  const recallMatch = path.match(/^recalls\/([^/]+)$/);
+  if (recallMatch && method === 'PATCH') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const recallId = decodeURIComponent(recallMatch[1]);
+    let input; try { input = await body(request); } catch (e) { return error(e.message); }
+    const allowed=['type','due_date','channel','status'];
+    const entries=Object.entries(input).filter(([k])=>allowed.includes(k));
+    if(!entries.length) return error('No editable recall fields supplied.');
+    const sets=entries.map(([k])=>`${k}=?`).join(', '); const values=entries.map(([,v])=>v); values.push(now(),recallId);
+    await env.DB.prepare(`UPDATE recalls SET ${sets}, updated_at=? WHERE id=?`).bind(...values).run();
+    await audit(env,staff,request,'recall.updated','recall',recallId,{fields:entries.map(([k])=>k)});
+    return json({data:{id:recallId}});
+  }
+
+  const appointmentMatch = path.match(/^appointments\/([^/]+)$/);
+  if (appointmentMatch && method === 'PATCH') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const appointmentId=decodeURIComponent(appointmentMatch[1]);
+    let input; try { input=await body(request); } catch(e){ return error(e.message); }
+    const allowed=['start_at','end_at','visit_type','provider','status'];
+    const entries=Object.entries(input).filter(([k])=>allowed.includes(k));
+    if(!entries.length) return error('No editable appointment fields supplied.');
+    const sets=entries.map(([k])=>`${k}=?`).join(', '); const values=entries.map(([,v])=>v); values.push(now(),appointmentId);
+    await env.DB.prepare(`UPDATE appointments SET ${sets}, updated_at=? WHERE id=?`).bind(...values).run();
+    await audit(env,staff,request,'appointment.updated','appointment',appointmentId,{fields:entries.map(([k])=>k)});
+    return json({data:{id:appointmentId}});
+  }
+
+  const messageMatch = path.match(/^messages\/([^/]+)$/);
+  if (messageMatch && method === 'PATCH') {
+    const denied = requirePermission(staff, 'edit'); if (denied) return denied;
+    const messageId=decodeURIComponent(messageMatch[1]);
+    let input; try { input=await body(request); } catch(e){ return error(e.message); }
+    const status=String(input.status||'').trim();
+    if(!['Queued','Sent','Delivered','Failed','Read'].includes(status)) return error('Invalid message status.');
+    await env.DB.prepare(`UPDATE messages SET status=?, updated_at=? WHERE id=?`).bind(status,now(),messageId).run();
+    await audit(env,staff,request,'message.updated','message',messageId,{status});
+    return json({data:{id:messageId,status}});
+  }
+
+  // ---------- Practice settings ----------
+  if (path === 'settings' && method === 'GET') {
+    const denied=requirePermission(staff,'view'); if(denied) return denied;
+    const result=await env.DB.prepare(`SELECT key,value_json,updated_at FROM practice_settings ORDER BY key`).all();
+    const settings={}; for(const row of result.results){try{settings[row.key]=JSON.parse(row.value_json)}catch{settings[row.key]=row.value_json}}
+    return json({data:settings});
+  }
+  if (path === 'settings' && method === 'PATCH') {
+    const denied=requirePermission(staff,'admin'); if(denied) return denied;
+    let input; try{input=await body(request)}catch(e){return error(e.message)}
+    const timestamp=now();
+    for(const [key,value] of Object.entries(input||{})) {
+      if(!/^[a-zA-Z0-9_.-]{1,80}$/.test(key)) continue;
+      await env.DB.prepare(`INSERT INTO practice_settings (key,value_json,updated_by,updated_at) VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at`)
+        .bind(key,JSON.stringify(value),staff.id,timestamp).run();
+    }
+    await audit(env,staff,request,'settings.updated','practice_settings','practice',{keys:Object.keys(input||{})});
+    return json({data:{saved:true}});
+  }
+
+  // ---------- Staff administration ----------
+  if (path === 'staff' && method === 'GET') {
+    const denied=requirePermission(staff,'admin'); if(denied) return denied;
+    const result=await env.DB.prepare(`SELECT id,email,name,role,active,created_at,updated_at FROM staff ORDER BY name`).all();
+    return json({data:result.results});
+  }
+  if (path === 'staff' && method === 'POST') {
+    const denied=requirePermission(staff,'admin'); if(denied) return denied;
+    let input; try{input=await body(request)}catch(e){return error(e.message)}
+    const email=String(input.email||'').trim().toLowerCase(), name=String(input.name||'').trim(), role=String(input.role||'Front Desk').trim();
+    if(!email||!name) return error('Name and email are required.');
+    if(!ROLES[role]) return error('Invalid role.');
+    const staffId=id('USR'),timestamp=now();
+    try { await env.DB.prepare(`INSERT INTO staff (id,email,name,role,active,created_at,updated_at) VALUES (?,?,?,?,1,?,?)`).bind(staffId,email,name,role,timestamp,timestamp).run(); }
+    catch(e){ return error('A staff member with that email already exists.',409,'DUPLICATE_STAFF'); }
+    await audit(env,staff,request,'staff.created','staff',staffId,{role,email});
+    return json({data:{id:staffId}},201);
+  }
+
+  // ---------- Dashboard summary ----------
+  if (path === 'dashboard/summary' && method === 'GET') {
+    const denied=requirePermission(staff,'view'); if(denied) return denied;
+    const [patients,recalls,tasks,messages,appointments,ready,high]=await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM patients`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM recalls`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE done=0`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM messages`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM appointments WHERE date(start_at)=date('now')`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM recalls WHERE status IN ('Ready','Scheduled') AND date(due_date)<=date('now','+30 day')`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS count FROM tasks WHERE done=0 AND priority='High'`).first()
+    ]);
+    return json({data:{patients:patients.count,recalls:recalls.count,openTasks:tasks.count,messages:messages.count,appointmentsToday:appointments.count,recallAttention:ready.count,highPriorityTasks:high.count}});
+  }
+
   // ---------- Tasks ----------
   if (path === 'tasks' && method === 'GET') {
     const denied = requirePermission(staff, 'view'); if (denied) return denied;
