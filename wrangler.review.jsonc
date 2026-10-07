@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "optiflow-client-review-db",
-      "database_id": "REPLACE_WITH_CLIENT_REVIEW_D1_DATABASE_ID",
+      "database_id": "0c61fcb8-511e-4c93-b4d4-add747db2d53",
       "migrations_dir": "migrations"
     }
   ]
