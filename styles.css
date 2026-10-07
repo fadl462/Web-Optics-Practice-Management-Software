@@ -172,3 +172,9 @@ body{min-height:100dvh;overflow-x:hidden;}
 .recall-funnel strong{display:block;font-size:22px;margin:4px 0 7px}
 .recall-funnel i{display:block;height:5px;border-radius:99px;background:#0da397;opacity:.8}
 @media(max-width:760px){.recall-toolbar .recall-filters{justify-content:flex-start}.recall-funnel{grid-template-columns:1fr 1fr}}
+/* v10 patient timeline */
+.timeline-card .timeline{max-height:520px;overflow:auto;padding-right:4px}
+.timeline-card .event{grid-template-columns:32px minmax(0,1fr) auto}
+.timeline-card .event>div:nth-child(2){min-width:0}
+.timeline-type{display:inline-flex;margin-top:5px;padding:3px 7px;border-radius:999px;background:#f1f5f8;color:#6d7d8f;font-size:9px;font-weight:700;letter-spacing:.2px}
+.timeline-card .event p{max-width:760px;white-space:normal;word-break:break-word}

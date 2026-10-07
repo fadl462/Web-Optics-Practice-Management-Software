@@ -318,16 +318,32 @@ async function api(request, env, ctx) {
     const patientId = decodeURIComponent(patientMatch[1]);
     const patient = await env.DB.prepare(`SELECT * FROM patients WHERE id=?`).bind(patientId).first();
     if (!patient) return error('Patient not found.', 404, 'NOT_FOUND');
-    const [insurance, prescriptions, history, allergies, medications, communicationPreferences] = await Promise.all([
+    const [insurance, prescriptions, history, allergies, medications, communicationPreferences, recalls, appointments, messages, tasks] = await Promise.all([
       env.DB.prepare(`SELECT * FROM insurance_policies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM prescriptions WHERE patient_id=? ORDER BY prescribed_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM medical_history WHERE patient_id=? ORDER BY event_date DESC, created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM allergies WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM medications WHERE patient_id=? ORDER BY created_at DESC`).bind(patientId).all(),
       env.DB.prepare(`SELECT * FROM communication_preferences WHERE patient_id=?`).bind(patientId).first(),
+      env.DB.prepare(`SELECT id,type,due_date,channel,status,source,created_at,updated_at FROM recalls WHERE patient_id=? ORDER BY COALESCE(due_date,created_at) DESC LIMIT 100`).bind(patientId).all(),
+      env.DB.prepare(`SELECT id,start_at,end_at,visit_type,provider,status,created_at,updated_at FROM appointments WHERE patient_id=? ORDER BY start_at DESC LIMIT 100`).bind(patientId).all(),
+      env.DB.prepare(`SELECT id,channel,direction,body,status,created_at,updated_at FROM messages WHERE patient_id=? ORDER BY created_at DESC LIMIT 100`).bind(patientId).all(),
+      env.DB.prepare(`SELECT id,title,owner,due_date,priority,done,created_at,updated_at FROM tasks WHERE patient_id=? ORDER BY created_at DESC LIMIT 100`).bind(patientId).all(),
     ]);
+
+    const timeline = [];
+    for (const x of history.results || []) timeline.push({ id:x.id, type:'Clinical history', title:x.category || 'Clinical history', detail:x.description || 'Clinical history documented', time:x.event_date || x.created_at });
+    for (const x of allergies.results || []) timeline.push({ id:x.id, type:'Safety', title:'Allergy recorded', detail:[x.allergen, x.reaction, x.severity].filter(Boolean).join(' · '), time:x.created_at });
+    for (const x of medications.results || []) timeline.push({ id:x.id, type:'Medication', title:'Medication recorded', detail:[x.name, x.dose, x.frequency].filter(Boolean).join(' · '), time:x.created_at });
+    for (const x of prescriptions.results || []) timeline.push({ id:x.id, type:'Prescription', title:'Prescription recorded', detail:[x.notes, x.od_sphere && `OD ${x.od_sphere}`, x.os_sphere && `OS ${x.os_sphere}`].filter(Boolean).join(' · ') || 'Prescription updated', time:x.prescribed_at || x.created_at });
+    for (const x of insurance.results || []) timeline.push({ id:x.id, type:'Insurance', title:'Insurance policy recorded', detail:[x.provider, x.policy_number, x.status].filter(Boolean).join(' · '), time:x.updated_at || x.created_at });
+    for (const x of recalls.results || []) timeline.push({ id:x.id, type:'Recall', title:'Recall '+(x.status || 'scheduled').toLowerCase(), detail:[x.type, x.channel, x.source].filter(Boolean).join(' · '), time:x.updated_at || x.created_at });
+    for (const x of appointments.results || []) timeline.push({ id:x.id, type:'Appointment', title:'Appointment '+(x.status || 'scheduled').toLowerCase(), detail:[x.visit_type, x.provider].filter(Boolean).join(' · '), time:x.start_at || x.created_at });
+    for (const x of messages.results || []) timeline.push({ id:x.id, type:'Communication', title:(x.direction === 'outbound' ? 'Practice message' : 'Patient message')+' · '+(x.status || 'recorded'), detail:[x.channel, x.body].filter(Boolean).join(' · '), time:x.created_at });
+    for (const x of tasks.results || []) timeline.push({ id:x.id, type:'Task', title:(x.done ? 'Task completed' : 'Task created'), detail:[x.title, x.priority, x.owner].filter(Boolean).join(' · '), time:x.updated_at || x.created_at });
+    timeline.sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
     await audit(env, staff, request, 'patient.viewed', 'patient', patientId);
-    return json({ data: { patient, insurance: insurance.results, prescriptions: prescriptions.results, history: history.results, allergies: allergies.results, medications: medications.results, communicationPreferences: communicationPreferences || null } });
+    return json({ data: { patient, insurance: insurance.results, prescriptions: prescriptions.results, history: history.results, allergies: allergies.results, medications: medications.results, communicationPreferences: communicationPreferences || null, timeline: timeline.slice(0, 100) } });
   }
 
   if (patientMatch && method === 'PATCH') {
