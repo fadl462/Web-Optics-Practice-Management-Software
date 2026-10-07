@@ -38,6 +38,32 @@ function now() {
   return new Date().toISOString();
 }
 
+function bytesToHex(bytes) {
+  return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacSha256(secret, payload) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  return bytesToHex(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload)));
+}
+
+function safeEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return result === 0;
+}
+
+function retryDelayMinutes(attemptNo) {
+  return [5, 15, 30, 60][Math.max(0, Math.min(3, attemptNo - 1))];
+}
+
 function allowedOrigin(request) {
   const origin = request.headers.get('Origin');
   if (!origin) return true;
@@ -160,9 +186,14 @@ async function runRecallAutomation(env) {
 
   // 3) Try provider delivery when server-side provider credentials are configured.
   const outbound = await env.DB.prepare(
-    `SELECT m.*, p.phone, p.email FROM messages m JOIN patients p ON p.id=m.patient_id
-     WHERE m.direction='outbound' AND m.status='Queued' ORDER BY m.created_at ASC LIMIT 100`
-  ).all();
+    `SELECT m.*, p.phone, p.email, ma.attempt_no, ma.next_attempt_at
+     FROM messages m JOIN patients p ON p.id=m.patient_id
+     LEFT JOIN message_attempts ma ON ma.message_id=m.id
+       AND ma.attempt_no=(SELECT MAX(x.attempt_no) FROM message_attempts x WHERE x.message_id=m.id)
+     WHERE m.direction='outbound' AND m.status='Queued'
+       AND (ma.next_attempt_at IS NULL OR ma.next_attempt_at <= ?)
+     ORDER BY m.created_at ASC LIMIT 100`
+  ).bind(timestamp).all();
   for (const message of outbound.results || []) {
     const channel = message.channel;
     const endpoint = channel === 'SMS' ? env.SMS_PROVIDER_URL : env.EMAIL_PROVIDER_URL;
@@ -184,22 +215,36 @@ async function runRecallAutomation(env) {
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
+        headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}`, 'x-optiflow-message-id': message.id },
         body: JSON.stringify({ to: destination, body: message.body, channel, messageId: message.id })
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.message || `Provider returned HTTP ${response.status}`);
+      if (!response.ok) {
+        const err = new Error(payload?.message || `Provider returned HTTP ${response.status}`);
+        err.providerStatus = response.status;
+        throw err;
+      }
       const providerId = payload?.id || payload?.messageId || payload?.sid || null;
       await env.DB.batch([
         env.DB.prepare(`UPDATE messages SET status='Sent', provider_message_id=?, updated_at=? WHERE id=?`).bind(providerId, timestamp, message.id),
-        env.DB.prepare(`UPDATE message_attempts SET state='Sent', provider_message_id=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(providerId, timestamp, message.id, message.id)
+        env.DB.prepare(`UPDATE message_attempts SET state='Sent', provider_message_id=?, next_attempt_at=NULL, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(providerId, timestamp, message.id, message.id)
       ]);
       delivered += 1;
     } catch (e) {
-      await env.DB.batch([
-        env.DB.prepare(`UPDATE messages SET status='Failed', updated_at=? WHERE id=?`).bind(timestamp, message.id),
-        env.DB.prepare(`UPDATE message_attempts SET state='Failed', error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(String(e?.message || e), timestamp, message.id, message.id)
-      ]);
+      const attemptNo = Number(message.attempt_no || 1);
+      const providerStatus = Number(e?.providerStatus || 0);
+      const transient = !providerStatus || providerStatus === 408 || providerStatus === 425 || providerStatus === 429 || providerStatus >= 500;
+      const maxAttempts = 4;
+      if (transient && attemptNo < maxAttempts) {
+        const delay = retryDelayMinutes(attemptNo);
+        await env.DB.prepare(`UPDATE message_attempts SET state='RetryScheduled', error_message=?, next_attempt_at=datetime('now','+' || ? || ' minutes'), updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`)
+          .bind(String(e?.message || e), delay, timestamp, message.id, message.id).run();
+      } else {
+        await env.DB.batch([
+          env.DB.prepare(`UPDATE messages SET status='Failed', updated_at=? WHERE id=?`).bind(timestamp, message.id),
+          env.DB.prepare(`UPDATE message_attempts SET state='Failed', error_code=?, error_message=?, next_attempt_at=NULL, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(providerStatus ? `HTTP_${providerStatus}` : 'DELIVERY_ERROR', String(e?.message || e), timestamp, message.id, message.id)
+        ]);
+      }
     }
   }
   return { recallsQueued, messagesQueued, delivered };
@@ -209,18 +254,36 @@ async function messageWebhook(request, env) {
   if (!env.DB) return error('Production database is not configured.', 503, 'DB_NOT_CONFIGURED');
   const secret = String(env.MESSAGE_WEBHOOK_SECRET || '').trim();
   if (!secret) return error('Message webhook is not configured.', 503, 'WEBHOOK_NOT_CONFIGURED');
-  const provided = String(request.headers.get('X-OptiFlow-Webhook-Secret') || '').trim();
-  if (!provided || provided !== secret) return error('Webhook authentication failed.', 401, 'WEBHOOK_UNAUTHORIZED');
-  let input; try { input = await body(request); } catch (e) { return error(e.message); }
+
+  const raw = await request.text();
+  if (raw.length > 50000) return error('Webhook body is too large.', 413, 'PAYLOAD_TOO_LARGE');
+  const signatureHeader = String(request.headers.get('X-OptiFlow-Signature') || '').trim();
+  const legacySecret = String(request.headers.get('X-OptiFlow-Webhook-Secret') || '').trim();
+  const expected = await hmacSha256(secret, raw);
+  const supplied = signatureHeader.replace(/^sha256=/i, '').trim().toLowerCase();
+  const signatureValid = supplied && safeEqual(supplied, expected);
+  const legacyValid = legacySecret && safeEqual(legacySecret, secret);
+  if (!signatureValid && !legacyValid) return error('Webhook authentication failed.', 401, 'WEBHOOK_UNAUTHORIZED');
+
+  let input;
+  try { input = JSON.parse(raw || '{}'); } catch { return error('Webhook JSON is invalid.'); }
   const messageId = String(input.messageId || '').trim();
   const status = String(input.status || '').trim();
+  const providerEventId = String(input.eventId || input.providerEventId || input.id || '').trim() || null;
   if (!messageId || !['Sent','Delivered','Failed','Read'].includes(status)) return error('messageId and a valid delivery status are required.');
   const message = await env.DB.prepare(`SELECT id FROM messages WHERE id=?`).bind(messageId).first();
   if (!message) return error('Message not found.', 404, 'NOT_FOUND');
+
+  if (providerEventId) {
+    const duplicate = await env.DB.prepare(`SELECT id FROM message_delivery_events WHERE provider_event_id=? LIMIT 1`).bind(providerEventId).first();
+    if (duplicate) return json({ ok: true, duplicate: true, data: { messageId, status } });
+  }
+
   const timestamp = now();
   await env.DB.batch([
+    env.DB.prepare(`INSERT INTO message_delivery_events (id,message_id,provider_event_id,status,provider_message_id,error_code,error_message,received_at) VALUES (?,?,?,?,?,?,?,?)`).bind(id('MDE'), messageId, providerEventId, status, input.providerMessageId || null, input.errorCode || null, input.errorMessage || null, timestamp),
     env.DB.prepare(`UPDATE messages SET status=?, provider_message_id=COALESCE(?,provider_message_id), updated_at=? WHERE id=?`).bind(status, input.providerMessageId || null, timestamp, messageId),
-    env.DB.prepare(`UPDATE message_attempts SET state=?, provider_message_id=COALESCE(?,provider_message_id), error_code=?, error_message=?, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(status, input.providerMessageId || null, input.errorCode || null, input.errorMessage || null, timestamp, messageId, messageId)
+    env.DB.prepare(`UPDATE message_attempts SET state=?, provider_message_id=COALESCE(?,provider_message_id), error_code=?, error_message=?, next_attempt_at=NULL, updated_at=? WHERE message_id=? AND attempt_no=(SELECT MAX(attempt_no) FROM message_attempts WHERE message_id=?)`).bind(status, input.providerMessageId || null, input.errorCode || null, input.errorMessage || null, timestamp, messageId, messageId)
   ]);
   return json({ ok: true, data: { messageId, status } });
 }

@@ -1,41 +1,29 @@
-# OptiFlow — Critical Build v10
+# OptiFlow Critical Build v11
 
 ## What changed
+- Sidebar remains at the readable 14px navigation scale.
+- Added delivery reliability migration `0004_delivery_reliability.sql`.
+- Provider delivery now supports transient-failure retry scheduling with 5/15/30/60 minute backoff, up to four attempts.
+- Provider HTTP 4xx errors (except retryable 408/425/429) fail immediately; 5xx/timeout-style failures are retried.
+- Added `message_delivery_events` for idempotent webhook event recording.
+- Message webhook now supports HMAC SHA-256 verification using `X-OptiFlow-Signature: sha256=<hex>` and retains the legacy secret header for controlled transition.
+- Duplicate provider events are ignored safely.
+- Delivery events update the latest message attempt and clear retry scheduling.
+- Provider credentials remain server-side only.
 
-### Patient timeline
-The patient record now loads a server-generated unified timeline from D1. It combines:
-- Clinical history
-- Allergies and safety information
-- Medications
-- Prescriptions
-- Insurance updates
-- Recalls and recall status
-- Appointments
-- Patient/practice messages
-- Tasks
+## Required migration
+Apply `0004_delivery_reliability.sql` after the previous migrations.
 
-The timeline is read through the authenticated Worker and is limited to the patient's own record.
+## Webhook contract
+POST `/api/webhooks/messages`
 
-### Patient record UI
-The timeline now shows an event category, compact event icon, detail, and timestamp. The frontend no longer fabricates recent patient activity when a backend record is available.
+Preferred header:
+`X-OptiFlow-Signature: sha256=<HMAC-SHA256 hex of the raw request body using MESSAGE_WEBHOOK_SECRET>`
 
-### Date handling
-Dashboard and Reports now use the browser's current date rather than a hard-coded development date.
+Body example:
+`{"eventId":"provider-event-123","messageId":"MSG-...","status":"Delivered","providerMessageId":"provider-456"}`
 
-### Security
-The existing Cloudflare Access + Worker + D1 authorization boundary remains in place. Patient timeline data is available only after server-side authorization.
+Accepted statuses: `Sent`, `Delivered`, `Failed`, `Read`.
 
-## Deployment
-
-1. Replace the current project files with the files in this package.
-2. Keep the existing D1 migrations `0001_initial.sql`, `0002_patient_notes.sql`, and `0003_messaging_delivery.sql`.
-3. Deploy the Worker using the existing `wrangler.production.jsonc`.
-4. Keep `BOOTSTRAP_ADMIN_EMAIL` configured as a Worker secret.
-5. If messaging providers are configured, keep their credentials as Worker secrets. Never place provider tokens in GitHub or frontend JavaScript.
-6. Keep `MESSAGE_WEBHOOK_SECRET` configured before enabling delivery webhooks.
-
-## Important
-
-Do not run `optiflow_demo_seed.sql` against a production database containing real patient data.
-
-Real SMS/email delivery is only active when the corresponding server-side provider URL and token are configured. Otherwise messages remain queued/provider-not-configured and are not represented as delivered.
+## Security
+Do not place provider URLs, tokens, or webhook secrets in frontend code or GitHub. Configure them as Cloudflare Worker secrets/variables.
